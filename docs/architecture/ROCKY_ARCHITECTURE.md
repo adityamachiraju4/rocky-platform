@@ -1,0 +1,64 @@
+# Rocky Architecture Handbook
+
+> **The Canonical Architectural Reference for Project Rocky**
+
+---
+
+| Property | Value |
+|----------|-------|
+| **Project** | Rocky |
+| **Document** | `ROCKY_ARCHITECTURE.md` |
+| **Version** | **v0.1 Foundation** |
+| **Status** | **Foundation Locked** |
+| **Owner** | Project Rocky |
+| **Primary Architect** | Atlas (Chief AI Architect) |
+| **Repository** | `docs/architecture/ROCKY_ARCHITECTURE.md` |
+
+---
+
+# Purpose
+
+This handbook is the authoritative architectural reference for Project Rocky.
+
+It documents the architectural philosophy, engineering principles, governance model, and Architecture Decision Records (ADRs) that guide the design and evolution of the platform.
+
+The objective of this handbook is to ensure that every architectural and engineering decision remains aligned with Rocky's long-term vision, providing a stable foundation as the platform grows.
+
+---
+
+# Scope
+
+This handbook documents:
+
+- The Rocky Creed
+- Architectural Vision
+- Engineering Constitution
+- Architecture Decision Records (ADR-0001 through ADR-0010)
+- Capability Architecture
+- Repository Architecture
+- Current Implementation Status
+- Long-Term Architectural Roadmap
+
+Implementation details, sprint planning, API specifications, and feature documentation are intentionally maintained in their respective technical documents and are outside the scope of this handbook.
+
+---
+
+# Intended Audience
+
+This handbook is intended for:
+
+- Software Architects
+- AI Engineers
+- Backend Engineers
+- Frontend Engineers
+- Contributors
+- Technical Reviewers
+- Future Maintainers
+
+Every significant architectural change within Project Rocky should reference this handbook before implementation.
+
+---
+
+> **Architecture First. Implementation Second.**
+>
+> Rocky's architecture is designed to outlive individual implementations, technologies, and development cycles.
