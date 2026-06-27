@@ -16,6 +16,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.session import Session
 
 
 class User(Base):
@@ -66,6 +67,11 @@ class User(Base):
     )
 
     devices: Mapped[list["Device"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    sessions: Mapped[list["Session"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
