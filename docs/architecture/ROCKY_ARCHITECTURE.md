@@ -62,3 +62,13 @@ Every significant architectural change within Project Rocky should reference thi
 > **Architecture First. Implementation Second.**
 >
 > Rocky's architecture is designed to outlive individual implementations, technologies, and development cycles.
+
+---
+
+# Version History
+
+| Version | Date | Status | Description |
+|----------|------|--------|-------------|
+| **0.1 Foundation** | June 2026 | **Locked** | Initial architectural foundation of Project Rocky, including the Rocky Creed, Architectural Vision, Engineering Constitution, and ADR-0001 through ADR-0010. |
+
+---
