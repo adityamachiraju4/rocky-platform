@@ -72,3 +72,33 @@ Every significant architectural change within Project Rocky should reference thi
 | **0.1 Foundation** | June 2026 | **Locked** | Initial architectural foundation of Project Rocky, including the Rocky Creed, Architectural Vision, Engineering Constitution, and ADR-0001 through ADR-0010. |
 
 ---
+
+# Table of Contents
+
+1. Introduction
+2. Rocky Creed
+3. Architectural Vision
+4. Engineering Constitution
+   - Article I — Capabilities Before Features
+   - Article II — Memory Before Intelligence
+   - Article III — Interfaces Before Implementation
+   - Article IV — Extensibility Before Optimization
+   - Article V — Architecture Before Code
+5. Architecture Decision Records
+   - ADR-0001
+   - ADR-0002
+   - ADR-0003
+   - ADR-0004
+   - ADR-0005
+   - ADR-0006
+   - ADR-0007
+   - ADR-0008
+   - ADR-0009
+   - ADR-0010
+6. Capability Architecture
+7. Repository Architecture
+8. Implementation Status
+9. Architectural Roadmap
+10. Appendix
+
+---
