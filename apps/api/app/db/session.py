@@ -107,6 +107,11 @@ def _build_database_url() -> URL:
     )
 
 
+def get_database_url() -> str:
+    """Return the configured database URL for external consumers (e.g. Alembic)."""
+    return str(_build_database_url())
+
+
 def get_engine() -> AsyncEngine:
     """Return the process-wide async engine, creating it on first use.
 
@@ -157,4 +162,5 @@ __all__ = [
     "AsyncSessionLocal",
     "get_engine",
     "get_sessionmaker",
+    "get_database_url",
 ]

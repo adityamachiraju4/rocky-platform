@@ -17,7 +17,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0002_identity_domain"
-down_revision = "0001_database_foundation"
+down_revision = None
 branch_labels = None
 depends_on = None
 
