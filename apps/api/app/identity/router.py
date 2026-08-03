@@ -9,7 +9,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 
-from .dependencies import IdentityServiceDep
+from app.core.dependencies import IdentityServiceDep
 from .exceptions import (
     EmailAlreadyExistsError,
     PreferencesNotFoundError,
