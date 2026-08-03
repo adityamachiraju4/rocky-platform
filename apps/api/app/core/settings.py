@@ -12,11 +12,33 @@ Environment variables
 """
 from __future__ import annotations
 
+# --- .env loading (Platform-003) ---
+# Load the .env file exactly once, here in the centralized configuration
+# module. Every path that needs config imports app.core.settings (runtime
+# directly; Alembic transitively via app.db.session), so this is the single
+# load site. The path is resolved relative to this module — settings.py lives
+# at apps/api/app/core/settings.py, so the project .env is three parents up at
+# apps/api/.env — which makes loading independent of the process working
+# directory (pytest, alembic, and `uvicorn` may each start from a different
+# CWD). Real environment variables take precedence over .env values
+# (override=False), preserving existing behavior in CI and production.
+from pathlib import Path as _Path
+
+from dotenv import load_dotenv as _load_dotenv
+
+_ENV_PATH = _Path(__file__).resolve().parents[2] / ".env"
+_load_dotenv(_ENV_PATH, override=False)
+# --- end .env loading ---
+
 import os
 from datetime import timedelta
 
+class MissingConfigurationError(RuntimeError):
+    """Raised when a required configuration value is missing."""
+
 _DEFAULT_SESSION_TTL_DAYS = 30
 _DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30
+_MISSING = object()
 
 
 def _ttl_days(env_var: str, default_days: int) -> timedelta:
@@ -43,6 +65,18 @@ def get_refresh_token_ttl() -> timedelta:
         "REFRESH_TOKEN_TTL_DAYS", _DEFAULT_REFRESH_TOKEN_TTL_DAYS
     )
 
+def get_refresh_token_pepper() -> bytes:
+    """Return the server-side pepper used for refresh-token hashing."""
+
+    raw = os.getenv("REFRESH_TOKEN_PEPPER", _MISSING)
+
+    if raw is _MISSING or raw == "":
+        raise MissingConfigurationError(
+            "REFRESH_TOKEN_PEPPER is not configured."
+        )
+
+    return raw.encode("utf-8")
+
 
 # Convenience module-level constants, evaluated at import time. Functions
 # above remain the source of truth for callers that need late binding.
@@ -53,6 +87,8 @@ REFRESH_TOKEN_TTL: timedelta = get_refresh_token_ttl()
 __all__ = [
     "SESSION_TTL",
     "REFRESH_TOKEN_TTL",
+    "MissingConfigurationError",
     "get_session_ttl",
     "get_refresh_token_ttl",
+    "get_refresh_token_pepper",
 ]

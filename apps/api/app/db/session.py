@@ -31,6 +31,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
+# Platform-003: importing settings loads .env exactly once (side effect).
+# Alembic and the runtime both import app.db.session; this guarantees the
+# environment is populated before any DATABASE_URL / POSTGRES_* read.
+from app.core import settings as _settings  # noqa: F401
+
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
