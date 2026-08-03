@@ -1,0 +1,77 @@
+"""Tests for Platform-004 application lifecycle and health/readiness probes."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from app.main import app
+
+
+@pytest_asyncio.fixture
+async def client() -> httpx.AsyncClient:
+    """In-process client that drives the app's real lifespan."""
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as ac:
+            yield ac
+
+
+@pytest.mark.asyncio
+async def test_health_is_liveness_only(client: httpx.AsyncClient) -> None:
+    """/health returns 200 and reports healthy without touching the DB."""
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "healthy"}
+
+
+@pytest.mark.asyncio
+async def test_ready_reports_ready_when_db_reachable(
+    client: httpx.AsyncClient,
+) -> None:
+    """/ready returns 200 when the database answers SELECT 1."""
+    resp = await client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready"}
+
+
+@pytest.mark.asyncio
+async def test_root_unchanged(client: httpx.AsyncClient) -> None:
+    """Root endpoint contract is preserved (no breaking change)."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+
+    body = resp.json()
+
+    assert body["status"] == "online"
+    assert body["version"] == "0.1.0"
+
+
+@pytest.mark.asyncio
+async def test_ready_returns_503_when_db_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/ready degrades to 503 when the DB dependency raises."""
+    from app import main
+
+    def _broken_sessionmaker():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(main, "get_sessionmaker", _broken_sessionmaker)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as ac:
+            resp = await ac.get("/ready")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "not ready"}
