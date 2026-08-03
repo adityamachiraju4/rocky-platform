@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.core.middleware_registry import configure_middleware
 from app.db.session import get_engine, get_sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,9 @@ app = FastAPI(
     description="Backend API for the Rocky AI Operating System",
     lifespan=lifespan,
 )
+
+# Platform middleware is registered in one place (Platform-006).
+configure_middleware(app)
 
 
 @app.get("/")
