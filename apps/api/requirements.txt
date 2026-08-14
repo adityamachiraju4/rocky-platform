@@ -1,0 +1,24 @@
+# Rocky API — runtime dependencies (direct only; transitives resolved by pip)
+# Python 3.12. Pins match the venv the 68-test suite passed against.
+
+# Web framework + ASGI server
+fastapi==0.138.1
+uvicorn==0.49.0
+starlette==1.3.1          # pinned: transitive via fastapi, but load-bearing (pure-ASGI middleware)
+
+# Data / ORM / migrations
+sqlalchemy==2.0.51
+greenlet==3.5.3          # SQLAlchemy async execution backend (NOT reliably auto-pulled; load-bearing)
+alembic==1.18.5
+asyncpg==0.31.0           # live PostgreSQL driver (Alembic + runtime)
+aiosqlite==0.22.1         # in-memory SQLite driver (test data layer)
+
+# Validation / settings
+pydantic==2.13.4
+email-validator==2.3.0    # required by pydantic EmailStr
+python-dotenv==1.2.2
+
+# Auth / security
+pwdlib==0.3.0             # Argon2id password hashing
+argon2-cffi==25.1.0       # pwdlib's Argon2 backend (pinned explicitly: actual hash backend)
+python-jose==3.5.0        # JWT
