@@ -9,20 +9,9 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.core.dependencies import IdentityServiceDep
-from .exceptions import (
-    EmailAlreadyExistsError,
-    PreferencesNotFoundError,
-    UserNotFoundError,
-)
-from .schemas import (
-    DeviceRead,
-    PreferencesRead,
-    PreferencesUpdate,
-    UserCreate,
-    UserRead,
-    UserUpdate,
-)
+from .dependencies import IdentityServiceDep
+from .exceptions import EmailAlreadyExistsError, UserNotFoundError
+from .schemas import DeviceRead, UserCreate, UserRead, UserUpdate
 
 router = APIRouter(prefix="/identity", tags=["identity"])
 
@@ -69,43 +58,7 @@ async def update_user(
     return UserRead.model_validate(user)
 
 
-@router.get(
-    "/preferences/{user_id}", response_model=PreferencesRead
-)
-async def get_preferences(
-    user_id: uuid.UUID, service: IdentityServiceDep
-) -> PreferencesRead:
-    try:
-        prefs = await service.get_preferences(user_id)
-    except PreferencesNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found",
-        ) from exc
-    return PreferencesRead.model_validate(prefs)
-
-
-@router.patch(
-    "/preferences/{user_id}", response_model=PreferencesRead
-)
-async def update_preferences(
-    user_id: uuid.UUID,
-    payload: PreferencesUpdate,
-    service: IdentityServiceDep,
-) -> PreferencesRead:
-    try:
-        prefs = await service.update_preferences(user_id, payload)
-    except PreferencesNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found",
-        ) from exc
-    return PreferencesRead.model_validate(prefs)
-
-
-@router.get(
-    "/devices/{user_id}", response_model=list[DeviceRead]
-)
+@router.get("/devices/{user_id}", response_model=list[DeviceRead])
 async def list_devices(
     user_id: uuid.UUID, service: IdentityServiceDep
 ) -> list[DeviceRead]:
