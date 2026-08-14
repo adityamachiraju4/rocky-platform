@@ -277,3 +277,59 @@ def test_revoked_session_is_inactive() -> None:
 def test_expired_session_is_inactive() -> None:
     row = _make_session_row(expires_in=timedelta(seconds=-1))
     assert SessionService.is_session_active(row) is False
+
+
+# --------------------------------------------------------------------------- #
+# Session version validation (Foundation-004 Phase 2)
+# --------------------------------------------------------------------------- #
+def _make_db_with_user_version(current_version):
+    """Mock AsyncSession whose execute().scalar_one_or_none() returns the
+    user's authoritative session_version (or None for a missing user)."""
+    db = MagicMock()
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=current_version)
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_validate_session_version_match_passes() -> None:
+    from app.services.session_service import SessionService
+    row = _make_session_row()
+    row.session_version = 4
+    service = SessionService(_make_db_with_user_version(4))
+    assert await service.validate_session_version(row) is None
+
+
+@pytest.mark.asyncio
+async def test_validate_session_version_mismatch_raises() -> None:
+    from app.services.session_service import (
+        SessionService,
+        SessionVersionMismatchError,
+    )
+    row = _make_session_row()
+    row.session_version = 2
+    service = SessionService(_make_db_with_user_version(5))
+    with pytest.raises(SessionVersionMismatchError):
+        await service.validate_session_version(row)
+
+
+@pytest.mark.asyncio
+async def test_validate_session_version_missing_user_raises() -> None:
+    from app.services.session_service import (
+        SessionService,
+        SessionNotFoundError,
+    )
+    row = _make_session_row()
+    row.session_version = 1
+    service = SessionService(_make_db_with_user_version(None))
+    with pytest.raises(SessionNotFoundError):
+        await service.validate_session_version(row)
+
+
+def test_session_version_mismatch_error_is_session_error() -> None:
+    from app.services.session_service import (
+        SessionError,
+        SessionVersionMismatchError,
+    )
+    assert issubclass(SessionVersionMismatchError, SessionError)

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.settings import get_refresh_token_ttl, get_session_ttl
 from app.models.refresh_token import RefreshToken
 from app.models.session import Session
+from app.models.user import User
 
 _REFRESH_TOKEN_BYTES = 32  # 256 bits of entropy
 
@@ -38,6 +39,11 @@ class SessionError(Exception):
 
 class SessionNotFoundError(SessionError):
     """Raised when a session cannot be located."""
+
+
+class SessionVersionMismatchError(SessionError):
+    """Raised when a session's snapshot session_version no longer matches the
+    user's authoritative session_version (session invalidated)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +175,28 @@ class SessionService:
         return session
 
     # ----------------------------------------------------------------- #
+    # Version validation (Foundation-004 Phase 2)
+    # ----------------------------------------------------------------- #
+    async def validate_session_version(self, session: Session) -> None:
+        """Enforce Session.session_version == User.session_version.
+
+        Match -> returns None. Mismatch -> SessionVersionMismatchError.
+        Missing user -> SessionNotFoundError. Never returns a boolean.
+        """
+        result = await self._db.execute(
+            select(User.session_version).where(User.id == session.user_id)
+        )
+        current = result.scalar_one_or_none()
+        if current is None:
+            raise SessionNotFoundError(str(session.user_id))
+        if session.session_version != current:
+            raise SessionVersionMismatchError(
+                f"session {session.id} version {session.session_version} "
+                f"!= user {session.user_id} version {current}"
+            )
+        return None
+
+    # ----------------------------------------------------------------- #
     # Active check
     # ----------------------------------------------------------------- #
     @staticmethod
@@ -188,4 +216,5 @@ __all__ = [
     "CreatedSession",
     "SessionError",
     "SessionNotFoundError",
+    "SessionVersionMismatchError",
 ]
