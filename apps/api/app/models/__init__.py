@@ -9,6 +9,7 @@ from app.models.device import Device
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
 from app.models.session import Session
+from app.models.task import Task
 from app.models.user import User
 
-__all__ = ["User", "Device", "Session", "RefreshToken", "Project"]
+__all__ = ["User", "Device", "Session", "RefreshToken", "Project", "Task"]

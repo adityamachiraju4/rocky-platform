@@ -1,8 +1,9 @@
-"""Project ORM model for Rocky's Projects domain.
+"""Task ORM model for Rocky's Tasks domain.
 
 Models hold structure only — no business logic, no ownership policy.
-Ownership is expressed structurally as a non-nullable FK to ``users.id``;
-enforcement lives in the service/repository layer.
+Ownership is *transitive*: a Task carries no ``user_id``. It belongs to a
+Project, and the Project belongs to a User. Enforcement lives in the
+repository/service layer, which scopes every read through the owning project.
 """
 from __future__ import annotations
 
@@ -16,25 +17,24 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
-    from app.models.task import Task
-    from app.models.user import User
+    from app.models.project import Project
 
 
-class Project(Base):
-    """A project owned by exactly one user."""
+class Task(Base):
+    """A task belonging to exactly one project."""
 
-    __tablename__ = "projects"
+    __tablename__ = "tasks"
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
-    name: Mapped[str] = mapped_column(
+    title: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
     )
@@ -48,6 +48,10 @@ class Project(Base):
         server_default="active",
         nullable=False,
     )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -60,12 +64,7 @@ class Project(Base):
         nullable=False,
     )
 
-    owner: Mapped["User"] = relationship(back_populates="projects")
-    tasks: Mapped[list["Task"]] = relationship(
-        back_populates="project",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
+    project: Mapped["Project"] = relationship(back_populates="tasks")
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
-        return f"<Project id={self.id!r} user_id={self.user_id!r}>"
+        return f"<Task id={self.id!r} project_id={self.project_id!r}>"
