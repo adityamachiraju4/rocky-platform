@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -45,6 +45,9 @@ class Device(Base):
         String(64),
         nullable=True,
     )
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True,
+    )
     last_seen: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -53,6 +56,12 @@ class Device(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "client_id", name="uq_devices_user_id_client_id"
+        ),
     )
 
     user: Mapped["User"] = relationship(back_populates="devices")

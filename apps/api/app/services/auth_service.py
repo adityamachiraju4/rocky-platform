@@ -1,23 +1,20 @@
-"""Authentication service for Project Rocky.
+"""Authentication (credential verification) service for Project Rocky.
 
-Composes the existing Identity (``User`` model) and Security (password
-verification + JWT) capabilities into an email/password authentication
-flow. This module is framework-independent: it depends only on an
-``AsyncSession`` for database access and on ``app.core.security`` for
-cryptographic primitives. It contains no FastAPI routes or dependencies.
+This service has a single responsibility: verify an email/password pair and
+the account's state, returning the authenticated :class:`User`. It does NOT
+mint tokens or create sessions — token/session/refresh lifecycle is owned by
+``app.auth.service.AuthLifecycleService``, which composes this service with
+``SessionService``.
+
+Framework-independent: depends only on an ``AsyncSession`` and on
+``app.core.security`` for password verification. No FastAPI.
 """
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import (
-    create_access_token,
-    create_refresh_token,
-    verify_password,
-)
+from app.core.security import verify_password
 from app.models.user import User
 
 
@@ -45,20 +42,8 @@ class UnverifiedUserError(AuthError):
     """Raised when the user exists and authenticates but is not verified."""
 
 
-# --------------------------------------------------------------------------- #
-# Result object (never carries the password hash)
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True, slots=True)
-class TokenPair:
-    """A freshly minted access/refresh token pair."""
-
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-
-
 class AuthService:
-    """Email/password authentication built on Identity + Security."""
+    """Email/password credential verification built on Identity + Security."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -69,24 +54,24 @@ class AuthService:
         )
         return result.scalar_one_or_none()
 
-    async def authenticate(self, email: str, password: str) -> TokenPair:
-        """Authenticate a user and return an access/refresh token pair.
+    async def authenticate(self, email: str, password: str) -> User:
+        """Verify credentials and account state, returning the ``User``.
 
         Resolution order is deliberate:
 
         1. Unknown email or wrong password -> ``InvalidCredentialsError``.
-        2. Correct credentials but inactive account ->
-           ``InactiveUserError``.
+        2. Correct credentials but inactive account -> ``InactiveUserError``.
         3. Correct credentials, active, but unverified ->
            ``UnverifiedUserError``.
 
-        Credentials are always fully verified *before* account-state
-        errors are raised, so state errors never leak which emails exist.
+        Credentials are always fully verified *before* account-state errors
+        are raised, so state errors never leak which emails exist. Token and
+        session issuance are the caller's responsibility.
         """
         user = await self._get_user_by_email(email)
 
-        # Verify the password even when the user is missing, to keep the
-        # code path (and timing) similar for known vs unknown emails.
+        # Verify the password even when the user is missing, to keep the code
+        # path (and timing) similar for known vs unknown emails.
         password_ok = (
             verify_password(password, user.password_hash)
             if user is not None
@@ -100,20 +85,11 @@ class AuthService:
         if not user.is_verified:
             raise UnverifiedUserError("User account is not verified.")
 
-        return self._issue_tokens(user)
-
-    @staticmethod
-    def _issue_tokens(user: User) -> TokenPair:
-        subject = str(user.id)
-        return TokenPair(
-            access_token=create_access_token(subject),
-            refresh_token=create_refresh_token(subject),
-        )
+        return user
 
 
 __all__ = [
     "AuthService",
-    "TokenPair",
     "AuthError",
     "InvalidCredentialsError",
     "InactiveUserError",

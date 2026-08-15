@@ -8,6 +8,7 @@ awaited, and ``execute`` is awaited and returns a result whose
 from __future__ import annotations
 
 import hashlib
+import hmac
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +16,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.refresh_token import RefreshToken
+
+_PEPPER = "test-refresh-pepper"
+
+@pytest.fixture(autouse=True)
+def _pepper_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SessionService._hash_token now hashes with REFRESH_TOKEN_PEPPER
+    # (approved Foundation freeze exception). Provide it for every test.
+    monkeypatch.setenv("REFRESH_TOKEN_PEPPER", _PEPPER)
+
 from app.models.session import Session
 from app.services.session_service import (
     CreatedSession,
@@ -128,8 +138,12 @@ async def test_refresh_token_is_hashed_before_storage() -> None:
     stored = [o for o in db._added if isinstance(o, RefreshToken)]
     assert len(stored) == 1
     token_row = stored[0]
-    expected = hashlib.sha256(
-        result.refresh_token.encode("utf-8")
+    # Peppered HMAC-SHA256 (approved freeze exception): the stored hash
+    # must match an HMAC keyed by REFRESH_TOKEN_PEPPER, not bare SHA-256.
+    expected = hmac.new(
+        _PEPPER.encode("utf-8"),
+        result.refresh_token.encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
     assert token_row.token_hash == expected
 

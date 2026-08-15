@@ -42,3 +42,19 @@ class DeviceRepository:
             select(Device).where(Device.user_id == user_id)
         )
         return list(result.scalars().all())
+
+    async def get_by_user_and_client_id(
+        self, user_id: uuid.UUID, client_id: uuid.UUID
+    ) -> Device | None:
+        result = await self._session.execute(
+            select(Device).where(
+                Device.user_id == user_id,
+                Device.client_id == client_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def add(self, device: Device) -> Device:
+        self._session.add(device)
+        await self._session.flush()
+        return device

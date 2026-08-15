@@ -14,6 +14,7 @@ automatic cleanup jobs, device fingerprinting, multi-device logout.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -22,7 +23,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.settings import get_refresh_token_ttl, get_session_ttl
+from app.core.settings import (
+    get_refresh_token_pepper,
+    get_refresh_token_ttl,
+    get_session_ttl,
+)
 from app.models.refresh_token import RefreshToken
 from app.models.session import Session
 from app.models.user import User
@@ -67,12 +72,18 @@ def _now() -> datetime:
 
 
 def _hash_token(plaintext: str) -> str:
-    """Hash a refresh token for storage (SHA-256 hex digest).
+    """Hash a refresh token for storage (peppered HMAC-SHA256 hex digest).
 
-    A refresh token is a high-entropy random value, so a fast cryptographic
-    hash is appropriate and lets us index/look it up by hash.
+    A refresh token is a high-entropy random value. It is hashed with a
+    keyed HMAC using the server-side ``REFRESH_TOKEN_PEPPER`` so that a
+    database-only compromise does not yield usable token hashes. The
+    output is 64 hex chars, indexable for lookup.
     """
-    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    return hmac.new(
+        get_refresh_token_pepper(),
+        plaintext.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class SessionService:

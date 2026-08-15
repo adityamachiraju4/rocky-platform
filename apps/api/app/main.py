@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.middleware_registry import configure_middleware
+from app.auth.router import router as auth_router
 from app.identity.router import router as identity_router
 from app.db.session import get_engine, get_sessionmaker
 
@@ -64,6 +65,7 @@ configure_middleware(app)
 
 # Capability routers (mounted after platform middleware).
 app.include_router(identity_router)
+app.include_router(auth_router)
 
 
 @app.get("/")
