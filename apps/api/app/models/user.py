@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -51,13 +51,13 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
-        server_default=func.true(),
+        server_default=true(),
         nullable=False,
     )
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        server_default=func.false(),
+        server_default=false(),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(

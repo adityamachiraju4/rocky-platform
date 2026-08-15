@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -68,7 +69,7 @@ class Session(Base):
     is_trusted: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        server_default=func.false(),
+        server_default=false(),
         nullable=False,
     )
     session_version: Mapped[int] = mapped_column(
