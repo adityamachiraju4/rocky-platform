@@ -16,6 +16,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.device import Device
+    from app.models.project import Project
     from app.models.session import Session
 
 
@@ -79,6 +80,11 @@ class User(Base):
     )
     sessions: Mapped[list["Session"]] = relationship(
         back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="owner",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
