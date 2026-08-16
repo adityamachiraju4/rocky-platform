@@ -15,6 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.activity import Activity
     from app.models.device import Device
     from app.models.project import Project
     from app.models.session import Session
@@ -85,6 +86,11 @@ class User(Base):
     )
     projects: Mapped[list["Project"]] = relationship(
         back_populates="owner",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    activities: Mapped[list["Activity"]] = relationship(
+        back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )

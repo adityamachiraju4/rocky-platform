@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.task import Task
 from app.models.user import User
 
+from app.activity.recorder import ActivityRecorder
+
 from .exceptions import OwningProjectNotFoundError, TaskNotFoundError
 from .repository import TaskRepository
 from .schemas import TaskCreate, TaskUpdate
@@ -31,6 +33,7 @@ class TasksService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._tasks = TaskRepository(session)
+        self._activity = ActivityRecorder(session)
 
     async def _require_owned_project(
         self, current_user: User, project_id: uuid.UUID
@@ -58,6 +61,13 @@ class TasksService:
             ),
         )
         await self._tasks.add(task)
+        await self._activity.record(
+            user_id=current_user.id,
+            event_type="task.created",
+            entity_type="task",
+            entity_id=task.id,
+            payload={"title": task.title, "status": task.status},
+        )
         await self._session.commit()
         await self._session.refresh(task)
         return task
@@ -92,14 +102,41 @@ class TasksService:
         task = await self.get_task(current_user, project_id, task_id)
         updates = data.model_dump(exclude_unset=True)
 
+        old_status = task.status
+        changed_fields = [
+            field
+            for field, value in updates.items()
+            if getattr(task, field) != value
+        ]
+
         new_status = updates.get("status")
-        if new_status is not None and new_status != task.status:
+        status_changed = (
+            new_status is not None and new_status != old_status
+        )
+        if status_changed:
             task.completed_at = (
                 datetime.now(timezone.utc) if new_status == COMPLETE else None
             )
 
-        for field, value in updates.items():
-            setattr(task, field, value)
+        for field in changed_fields:
+            setattr(task, field, updates[field])
+
+        if changed_fields:
+            if status_changed and new_status == COMPLETE:
+                event_type = "task.completed"
+            else:
+                event_type = "task.updated"
+            payload: dict = {"changed_fields": changed_fields}
+            if status_changed:
+                payload["old_status"] = old_status
+                payload["new_status"] = new_status
+            await self._activity.record(
+                user_id=current_user.id,
+                event_type=event_type,
+                entity_type="task",
+                entity_id=task.id,
+                payload=payload,
+            )
 
         await self._session.commit()
         await self._session.refresh(task)
