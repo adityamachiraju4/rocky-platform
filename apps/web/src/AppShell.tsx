@@ -17,6 +17,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
         <div className="rail-brand">Rocky</div>
         <div className="rail-nav">
           <NavLink to="/" end className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}>
+            Mission Control
+          </NavLink>
+          <NavLink to="/projects" className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}>
             Projects
           </NavLink>
           <NavLink to="/activity" className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}>

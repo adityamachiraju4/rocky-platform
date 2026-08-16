@@ -4,6 +4,7 @@ import { AuthProvider } from "./auth";
 import { useAuth } from "./useAuth";
 import LoginPage from "./pages/LoginPage";
 import ProjectsPage from "./pages/ProjectsPage";
+import MissionControlPage from "./pages/MissionControlPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
 import ActivityPage from "./pages/ActivityPage";
 
@@ -24,6 +25,14 @@ function AppRoutes() {
       />
       <Route
         path="/"
+        element={
+          <RequireAuth>
+            <MissionControlPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/projects"
         element={
           <RequireAuth>
             <ProjectsPage />

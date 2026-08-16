@@ -406,6 +406,89 @@ body {
   .login-card { padding: 32px 24px; }
 }
 
+/* ---- Mission Control ---- */
+.mc-section { margin-bottom: 32px; }
+.mc-heading {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0 0 12px;
+}
+
+.resume-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  text-decoration: none;
+  transition: border-color 0.12s, background 0.12s;
+}
+a.resume-card:hover { border-color: var(--border-strong); background: var(--surface-raised); }
+.resume-card-static { cursor: default; }
+.resume-label { color: var(--text); font-weight: 550; }
+.resume-time { color: var(--text-faint); font-size: 12px; }
+
+.mc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+@media (max-width: 720px) {
+  .mc-grid { grid-template-columns: 1fr; }
+}
+
+.mc-list { list-style: none; margin: 0; padding: 0; }
+.mc-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  background: var(--surface);
+  transition: border-color 0.12s;
+}
+.mc-list-row:hover { border-color: var(--border-strong); }
+.mc-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  text-decoration: none;
+  color: var(--text);
+  min-width: 0;
+}
+.mc-list-main:hover { color: var(--accent-hover); }
+.mc-count {
+  color: var(--text-dim);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.mc-task-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc-task-project { color: var(--text-faint); font-size: 12px; }
+
+.mc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 32px 0;
+}
+.mc-empty-cta { text-decoration: none; display: inline-block; }
+
 /* ---- Misc ---- */
 .muted { color: var(--text-dim); }
 .err { color: var(--danger); font-size: 13px; margin: 6px 0 0; }
