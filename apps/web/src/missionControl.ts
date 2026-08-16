@@ -18,11 +18,19 @@ export interface ActiveTaskRef {
   projectName: string;
 }
 
+export interface EntityRef {
+  kind: "project" | "task";
+  id: string;
+  name: string;
+  projectId: string;
+  projectName: string;
+}
 export interface MissionControlData {
   projects: ProjectSummary[];
   activeTasks: ActiveTaskRef[];
   recentActivity: Activity[];
   latestActivity: Activity | null;
+  entityById: Map<string, EntityRef>;
 }
 
 const RECENT_ACTIVITY_LIMIT = 8;
@@ -57,6 +65,25 @@ export async function loadMissionControl(): Promise<MissionControlData> {
     }
   });
 
+  const entityById = new Map<string, EntityRef>();
+  projects.forEach((project, i) => {
+    entityById.set(project.id, {
+      kind: "project",
+      id: project.id,
+      name: project.name,
+      projectId: project.id,
+      projectName: project.name,
+    });
+    for (const task of taskLists[i]) {
+      entityById.set(task.id, {
+        kind: "task",
+        id: task.id,
+        name: task.title,
+        projectId: project.id,
+        projectName: project.name,
+      });
+    }
+  });
   const activity = await listActivity();
   const recentActivity = activity.slice(0, RECENT_ACTIVITY_LIMIT);
   const latestActivity = activity.length > 0 ? activity[0] : null;
@@ -66,5 +93,6 @@ export async function loadMissionControl(): Promise<MissionControlData> {
     activeTasks,
     recentActivity,
     latestActivity,
+    entityById,
   };
 }

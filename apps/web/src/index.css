@@ -419,9 +419,8 @@ body {
 
 .resume-card {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  flex-direction: column;
+  gap: 4px;
   padding: 16px 18px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -432,8 +431,14 @@ body {
 }
 a.resume-card:hover { border-color: var(--border-strong); background: var(--surface-raised); }
 .resume-card-static { cursor: default; }
-.resume-label { color: var(--text); font-weight: 550; }
-.resume-time { color: var(--text-faint); font-size: 12px; }
+.resume-eyebrow {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.resume-headline { color: var(--text); font-weight: 550; font-size: 15px; }
+.resume-context { color: var(--text-faint); font-size: 12px; }
 
 .mc-grid {
   display: grid;

@@ -1,9 +1,8 @@
 import { Link } from "react-router-dom";
 import AppShell from "../AppShell";
 import { useResource } from "../useApi";
-import { loadMissionControl, type MissionControlData } from "../missionControl";
+import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
 import { humanizeEvent, summarizePayload } from "../activityLabels";
-import type { Activity } from "../types";
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -19,32 +18,28 @@ function formatTime(iso: string): string {
 // Resolve an activity event to the in-app route for its entity, when we can.
 // task.* -> the owning project's detail page; project.* -> that project.
 // Returns null when there is no sensible target (unknown entity type).
-function entityLink(activity: Activity, projectIdByTaskId: Map<string, string>): string | null {
-  if (activity.entity_type === "project") {
-    return `/projects/${activity.entity_id}`;
-  }
-  if (activity.entity_type === "task") {
-    const projectId = projectIdByTaskId.get(activity.entity_id);
-    return projectId ? `/projects/${projectId}` : null;
-  }
-  return null;
+function entityLink(ref: EntityRef | undefined): string | null {
+  if (!ref) return null;
+  return `/projects/${ref.projectId}`;
 }
 
 function ResumeCard({ data }: { data: MissionControlData }) {
   const { latestActivity } = data;
   if (!latestActivity) return null;
 
-  const projectIdByTaskId = new Map<string, string>();
-  for (const ref of data.activeTasks) {
-    projectIdByTaskId.set(ref.task.id, ref.projectId);
-  }
-  const href = entityLink(latestActivity, projectIdByTaskId);
+  const ref = data.entityById.get(latestActivity.entity_id);
+  const href = entityLink(ref);
   const label = humanizeEvent(latestActivity.event_type);
+  const headline = ref ? ref.name : label;
+  const context = ref
+    ? `${ref.projectName} \u00b7 ${formatTime(latestActivity.created_at)}`
+    : formatTime(latestActivity.created_at);
 
   const inner = (
     <>
-      <span className="resume-label">{label}</span>
-      <span className="resume-time mono">{formatTime(latestActivity.created_at)}</span>
+      <span className="resume-eyebrow">{label}</span>
+      <span className="resume-headline">{headline}</span>
+      <span className="resume-context mono">{context}</span>
     </>
   );
 
@@ -112,7 +107,7 @@ export default function MissionControlPage() {
                       <Link to={`/projects/${s.project.id}`} className="mc-list-main">
                         {s.project.name}
                       </Link>
-                      <span className="mc-count mono">{s.activeTaskCount}</span>
+                      <span className="mc-count"><span className="mono">{s.activeTaskCount}</span> active</span>
                     </li>
                   ))}
                 </ul>
