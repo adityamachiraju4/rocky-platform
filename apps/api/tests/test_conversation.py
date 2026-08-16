@@ -382,6 +382,165 @@ async def test_title_match_without_verb_does_not_execute(ctx) -> None:
 
 
 # --------------------------------------------------------------------------
+# activity.recall: grounded narration of the real ledger.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recall_narrates_real_activity(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Recall")
+    task = await _make_task(client, headers, project_id, title="ship it")
+
+    # Complete it through the domain path so the ledger gets a real
+    # task.completed event alongside task.created.
+    upd = await client.patch(
+        f"/projects/{project_id}/tasks/{task['id']}",
+        json={"status": "complete"},
+        headers=headers,
+    )
+    assert upd.status_code == 200, upd.text
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "what did I do"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "activity.recall"
+    reply = body["reply"]
+    assert reply.startswith("Recently:")
+    # Grounded: it names events that really happened, and nothing it invents.
+    assert "completed" in reply
+    assert "created" in reply
+
+
+@pytest.mark.asyncio
+async def test_recall_empty_ledger_is_honest(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "where did we leave off"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "activity.recall"
+    assert body["reply"] == "I don't have any recent activity recorded."
+
+
+@pytest.mark.asyncio
+async def test_recall_execute_recall_continuity(ctx) -> None:
+    # The demo arc: ask history, act, ask history again and see the act.
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Arc")
+    await _make_task(client, headers, project_id, title="homepage")
+
+    first = await client.post(
+        "/conversation",
+        json={"message": "catch me up"},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    first_reply = first.json()["reply"]
+    assert "completed" not in first_reply
+
+    act = await client.post(
+        "/conversation",
+        json={"message": "finish homepage"},
+        headers=headers,
+    )
+    assert act.status_code == 200, act.text
+    assert act.json()["executed"] is True
+
+    second = await client.post(
+        "/conversation",
+        json={"message": "catch me up"},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+    second_reply = second.json()["reply"]
+    assert second_reply.startswith("Recently:")
+    assert "completed" in second_reply
+
+
+# --------------------------------------------------------------------------
+# Semantic boundary contract: "what happened" -> recall, "what exists now"
+# -> project.list. Pinned so a future LlmResolver must preserve the routing.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boundary_past_working_on_routes_to_recall(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Bound")
+    await _make_task(client, headers, project_id, title="thing")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "what was I working on"},
+        headers=headers,
+    )
+    body = resp.json()
+    assert body["action"] == "activity.recall"
+
+
+@pytest.mark.asyncio
+async def test_boundary_present_working_on_routes_to_project_list(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await _make_project(client, headers, name="Bound")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "what am I working on"},
+        headers=headers,
+    )
+    body = resp.json()
+    assert body["action"] == "project.list"
+    assert body["reply"].startswith("You have")
+
+
+@pytest.mark.asyncio
+async def test_boundary_what_changed_routes_to_recall(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Bound")
+    await _make_task(client, headers, project_id, title="thing")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "what changed recently"},
+        headers=headers,
+    )
+    body = resp.json()
+    assert body["action"] == "activity.recall"
+
+
+@pytest.mark.asyncio
+async def test_boundary_my_projects_routes_to_project_list(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await _make_project(client, headers, name="Bound")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "my projects"},
+        headers=headers,
+    )
+    body = resp.json()
+    assert body["action"] == "project.list"
+
+
+# --------------------------------------------------------------------------
 # Safety edge 4: unknown action -> refused at the trust boundary.
 #
 # Cannot arise through HTTP (the HTTP path uses HardcodedResolver, which only

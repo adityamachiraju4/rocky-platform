@@ -17,9 +17,15 @@ v1 contract (deliberately explicit, pinned by tests):
     - 2+ title matches           -> AmbiguousReferenceError
 * Reads are narrow keyword routes:
     - "projects" / "what am I working on" / "what's going on"
-                                 -> project.list
+                                 -> project.list  (current state)
+    - "what did I do" / "where did we leave off" / "what changed"
+                                 -> activity.recall  (history)
     - "tasks in <project-name>"  -> task.list for the uniquely matched project
 * Anything else                  -> NoMatchError (honest miss, no execution)
+
+The recall/project split is a product boundary, not a grammatical one:
+recall answers "what happened", project.list answers "what exists now".
+"what was I working on" -> recall; "what am I working on" -> project.list.
 
 This is a testable dispatch skeleton, not language understanding.
 """
@@ -47,6 +53,19 @@ PROJECT_LIST_CUES: tuple[str, ...] = (
     "my projects",
     "list projects",
     "projects",
+)
+ACTIVITY_RECALL_CUES: tuple[str, ...] = (
+    "what did i do",
+    "what have i been working on",
+    "where did we leave off",
+    "where did we leave things",
+    "what was i working on",
+    "what happened recently",
+    "what did we do",
+    "give me a recap",
+    "recap",
+    "catch me up",
+    "what changed",
 )
 
 
@@ -136,6 +155,15 @@ class HardcodedResolver:
                         [p.name for p in pmatches]
                     )
             raise NoMatchError(message)
+
+        # --- activity.recall: continuity / history cues ---
+        # Product boundary, not grammar: recall answers "tell me what
+        # happened"; project.list answers "tell me what exists now".
+        # "what was i working on" -> recall; "what am i working on"
+        # -> project.list. Checked before project.list so history
+        # phrasing wins. Carries no args: the dispatch owns the window.
+        if any(cue in text for cue in ACTIVITY_RECALL_CUES):
+            return ResolvedAction(action=registry.ACTIVITY_RECALL)
 
         # --- project.list: narrow cues ---
         if any(cue in text for cue in PROJECT_LIST_CUES):

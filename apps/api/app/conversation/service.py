@@ -20,13 +20,17 @@ Honest non-execution: a no-match or ambiguous reference returns
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
+from app.models.activity import Activity
 
 from app.projects.service import ProjectsService
 from app.tasks.service import TasksService
 from app.tasks.schemas import TaskUpdate
+from app.activity.service import ActivityService
 
 from app.conversation import registry
 from app.conversation.exceptions import (
@@ -42,22 +46,36 @@ from app.conversation.resolver import (
     WorldView,
 )
 from app.conversation.schemas import ConversationResponse, ResolvedAction
+from app.conversation.responder import (
+    Outcome,
+    RecallFact,
+    Responder,
+    TemplateResponder,
+)
 
 
 class ConversationService:
     """Orchestrates one conversational turn over the peer capabilities."""
 
     def __init__(
-        self, session: AsyncSession, resolver: Resolver | None = None
+        self,
+        session: AsyncSession,
+        resolver: Resolver | None = None,
+        responder: Responder | None = None,
     ) -> None:
         # One shared session across every composed service, so a dispatched
         # mutation and its Activity event commit atomically.
         self._session = session
         self._projects = ProjectsService(session)
         self._tasks = TasksService(session)
+        self._activity = ActivityService(session)
         # Resolver is injectable so tests can pin behavior; defaults to the
         # deterministic v1 brain.
         self._resolver: Resolver = resolver or HardcodedResolver()
+        # Responder renders outcomes into words; injectable so a later
+        # LlmResponder can swap in behind the Protocol without touching
+        # dispatch. Defaults to the deterministic grounded template.
+        self._responder: Responder = responder or TemplateResponder()
 
     async def _build_world(self, current_user: User) -> WorldView:
         projects = await self._projects.list_projects(current_user)
@@ -87,39 +105,51 @@ class ConversationService:
         try:
             action = self._resolver.resolve(message, world)
         except NoMatchError:
-            return ConversationResponse(
-                executed=False,
-                reply="I couldn't find anything matching that.",
+            return self._respond(
+                Outcome(kind="no_match", executed=False)
             )
         except AmbiguousReferenceError as exc:
-            listed = "\n".join(f"- {c}" for c in exc.candidates)
-            return ConversationResponse(
-                executed=False,
-                reply=f"I found several matches:\n{listed}\nWhich one?",
+            return self._respond(
+                Outcome(
+                    kind="ambiguous",
+                    executed=False,
+                    candidates=tuple(exc.candidates),
+                )
             )
 
         # Trust boundary: the proposed action must be in the closed registry.
         if not registry.is_allowed(action.action):
             raise UnknownActionError(action.action)
 
-        return await self._dispatch(current_user, action)
+        outcome = await self._dispatch(current_user, action)
+        return self._respond(outcome)
+
+    def _respond(self, outcome: Outcome) -> ConversationResponse:
+        """Render an Outcome into the wire response. The reply string is
+        the Responder's job; the service only carries executed/action."""
+        return ConversationResponse(
+            executed=outcome.executed,
+            action=outcome.action,
+            reply=self._responder.render(outcome),
+        )
+
+    # How far back "recently" reaches, and the most events recall will
+    # narrate. Both are fixed in v1: the deterministic resolver proposes no
+    # window, so the dispatch owns it. A later LlmResolver may propose a
+    # window; that is when these stop being constants.
+    _RECALL_WINDOW = timedelta(hours=24)
+    _RECALL_MAX = 10
 
     async def _dispatch(
         self, current_user: User, action: ResolvedAction
-    ) -> ConversationResponse:
+    ) -> Outcome:
         if action.action == registry.PROJECT_LIST:
             projects = await self._projects.list_projects(current_user)
-            if not projects:
-                return ConversationResponse(
-                    executed=True,
-                    action=action.action,
-                    reply="You have no projects yet.",
-                )
-            names = ", ".join(p.name for p in projects)
-            return ConversationResponse(
+            return Outcome(
+                kind="project_list",
                 executed=True,
                 action=action.action,
-                reply=f"You have {len(projects)} project(s): {names}.",
+                project_names=tuple(p.name for p in projects),
             )
 
         if action.action == registry.TASK_LIST:
@@ -127,20 +157,13 @@ class ConversationService:
             tasks = await self._tasks.list_tasks(
                 current_user, action.project_id
             )
-            if not tasks:
-                return ConversationResponse(
-                    executed=True,
-                    action=action.action,
-                    reply="That project has no tasks.",
-                )
             active = [t for t in tasks if t.status == "active"]
-            return ConversationResponse(
+            return Outcome(
+                kind="task_list",
                 executed=True,
                 action=action.action,
-                reply=(
-                    f"That project has {len(tasks)} task(s), "
-                    f"{len(active)} active."
-                ),
+                task_total=len(tasks),
+                task_active=len(active),
             )
 
         if action.action == registry.TASK_UPDATE:
@@ -152,11 +175,63 @@ class ConversationService:
                 action.task_id,
                 TaskUpdate(status=action.status),
             )
-            return ConversationResponse(
+            return Outcome(
+                kind="task_updated",
                 executed=True,
                 action=action.action,
-                reply=f"Marked '{task.title}' as {task.status}.",
+                task_title=task.title,
+                task_status=task.status,
+            )
+
+        if action.action == registry.ACTIVITY_RECALL:
+            activities = await self._activity.list_activities(current_user)
+            recent = self._window_recent(activities)
+            facts = tuple(
+                RecallFact(
+                    event_type=a.event_type,
+                    entity_label=self._entity_label(a),
+                )
+                for a in recent
+            )
+            return Outcome(
+                kind="activity_recall",
+                executed=True,
+                action=action.action,
+                recall_facts=facts,
             )
 
         # Registry membership was checked upstream; reaching here is a bug.
         raise UnknownActionError(action.action)
+
+    def _window_recent(
+        self, activities: list[Activity]
+    ) -> list[Activity]:
+        """Most-recent-first, within the recall window, capped. Coerces naive
+        timestamps to UTC so the SQLite harness (which may return naive
+        datetimes) compares cleanly against an aware cutoff."""
+        cutoff = datetime.now(timezone.utc) - self._RECALL_WINDOW
+
+        def _aware(dt: datetime) -> datetime:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        within = [
+            a
+            for a in activities
+            if a.created_at is not None and _aware(a.created_at) >= cutoff
+        ]
+        within.sort(key=lambda a: _aware(a.created_at), reverse=True)
+        return within[: self._RECALL_MAX]
+
+    def _entity_label(self, activity: Activity) -> str:
+        """A human label for the entity an event concerned. Prefers a title
+        carried in the payload; falls back to the soft entity reference so
+        recall never depends on a payload shape it cannot guarantee."""
+        payload = activity.payload or {}
+        for key in ("title", "task_title", "name"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+        short = str(activity.entity_id)[:8]
+        return f"{activity.entity_type} {short}"
