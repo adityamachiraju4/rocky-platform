@@ -9,8 +9,9 @@ ConversationService.
 v1 contract (deliberately explicit, pinned by tests):
 
 * Completion is VERB-GATED. A task-title match alone never triggers a
-  mutation. One of ``complete`` / ``finish`` / ``done`` must be present AND a
-  the message (verbs + stopwords stripped) must uniquely match a task
+  mutation. One of the deterministic completion forms (``complete``,
+  ``completed``, ``finish``, ``finished``, ``done``) must be present AND the
+  message (verbs + safe filler stripped) must uniquely match a task
   title as a substring.
     - unique title match + verb  -> task.update{status: complete}
     - no title match             -> NoMatchError
@@ -33,18 +34,35 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+import re
 from typing import Protocol
 
 from app.conversation import registry
 from app.conversation.exceptions import (
     AmbiguousReferenceError,
+    CompletionTargetNotFoundError,
     NoMatchError,
 )
 from app.conversation.schemas import ResolvedAction
 
-COMPLETION_VERBS: tuple[str, ...] = ("complete", "finish", "done")
+COMPLETION_VERBS: frozenset[str] = frozenset(
+    {"complete", "completed", "finish", "finished", "done"}
+)
 COMPLETION_STOPWORDS: frozenset[str] = frozenset(
-    {"the", "a", "task", "as", "mark"}
+    {
+        "a",
+        "as",
+        "hey",
+        "i",
+        "is",
+        "it",
+        "mark",
+        "ok",
+        "okay",
+        "rocky",
+        "task",
+        "the",
+    }
 )
 PROJECT_LIST_CUES: tuple[str, ...] = (
     "what am i working on",
@@ -67,6 +85,11 @@ ACTIVITY_RECALL_CUES: tuple[str, ...] = (
     "catch me up",
     "what changed",
 )
+YESTERDAY_RECALL_CUES: tuple[str, ...] = (
+    "what did i do yesterday",
+    "what happened yesterday",
+    "yesterday",
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +101,7 @@ class TaskRef:
     project_id: uuid.UUID
     title: str
     project_name: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -108,19 +132,22 @@ class HardcodedResolver:
 
     def resolve(self, message: str, world: WorldView) -> ResolvedAction:
         text = message.strip().lower()
+        tokens = _tokens(text)
 
         # --- completion intent: verb-gated, phrase-in-title match ---
-        if any(verb in text for verb in COMPLETION_VERBS):
+        if any(token in COMPLETION_VERBS for token in tokens):
             tokens = [
                 w
-                for w in text.split()
+                for w in tokens
                 if w not in COMPLETION_VERBS and w not in COMPLETION_STOPWORDS
             ]
             phrase = " ".join(tokens).strip()
             if not phrase:
                 raise NoMatchError(message)
             matches = [
-                t for t in world.tasks if phrase in t.title.lower()
+                t
+                for t in world.tasks
+                if t.status == "active" and phrase in t.title.lower()
             ]
             if len(matches) == 1:
                 m = matches[0]
@@ -135,7 +162,7 @@ class HardcodedResolver:
                     [f"{m.title} ({m.project_name})" for m in matches]
                 )
             # verb present, no title matched -> honest miss
-            raise NoMatchError(message)
+            raise CompletionTargetNotFoundError(phrase)
 
         # --- task.list: "tasks in <project>" ---
         if "tasks in " in text:
@@ -162,6 +189,12 @@ class HardcodedResolver:
         # "what was i working on" -> recall; "what am i working on"
         # -> project.list. Checked before project.list so history
         # phrasing wins. Carries no args: the dispatch owns the window.
+        if any(cue in text for cue in YESTERDAY_RECALL_CUES):
+            return ResolvedAction(
+                action=registry.ACTIVITY_RECALL,
+                recall_window="yesterday",
+            )
+
         if any(cue in text for cue in ACTIVITY_RECALL_CUES):
             return ResolvedAction(action=registry.ACTIVITY_RECALL)
 
@@ -170,3 +203,7 @@ class HardcodedResolver:
             return ResolvedAction(action=registry.PROJECT_LIST)
 
         raise NoMatchError(message)
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text)

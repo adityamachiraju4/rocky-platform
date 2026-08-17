@@ -26,6 +26,7 @@ class ResolvedAction(BaseModel):
     project_id: uuid.UUID | None = None
     task_id: uuid.UUID | None = None
     status: str | None = None
+    recall_window: str | None = None
 
 
 class ConversationRequest(BaseModel):
@@ -33,6 +34,7 @@ class ConversationRequest(BaseModel):
     no owner, no session. Ownership derives from the authenticated user."""
 
     message: str = Field(min_length=1, max_length=2000)
+    timezone: str | None = Field(default=None, max_length=128)
 
 
 class ConversationResponse(BaseModel):

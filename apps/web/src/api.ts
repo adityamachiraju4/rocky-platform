@@ -16,6 +16,8 @@ import {
 } from "./tokenStore";
 import type {
   Activity,
+  ConversationRequest,
+  ConversationResponse,
   LoginRequest,
   Project,
   ProjectCreate,
@@ -207,3 +209,10 @@ export const updateTask = (
 // ---- Activity -----------------------------------------------------------
 
 export const listActivity = (): Promise<Activity[]> => request<Activity[]>("/activity");
+
+// ---- Conversation -------------------------------------------------------
+
+export const sendConversation = (
+  body: ConversationRequest,
+): Promise<ConversationResponse> =>
+  request<ConversationResponse>("/conversation", { method: "POST", body });

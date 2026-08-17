@@ -21,6 +21,7 @@ Honest non-execution: a no-match or ambiguous reference returns
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,7 @@ from app.activity.service import ActivityService
 from app.conversation import registry
 from app.conversation.exceptions import (
     AmbiguousReferenceError,
+    CompletionTargetNotFoundError,
     NoMatchError,
     UnknownActionError,
 )
@@ -92,12 +94,16 @@ class ConversationService:
                         project_id=p.id,
                         title=t.title,
                         project_name=p.name,
+                        status=t.status,
                     )
                 )
         return WorldView(projects=project_refs, tasks=tuple(task_refs))
 
     async def handle(
-        self, current_user: User, message: str
+        self,
+        current_user: User,
+        message: str,
+        timezone_name: str | None = None,
     ) -> ConversationResponse:
         world = await self._build_world(current_user)
 
@@ -107,6 +113,14 @@ class ConversationService:
         except NoMatchError:
             return self._respond(
                 Outcome(kind="no_match", executed=False)
+            )
+        except CompletionTargetNotFoundError as exc:
+            return self._respond(
+                Outcome(
+                    kind="target_not_found",
+                    executed=False,
+                    target=exc.target,
+                )
             )
         except AmbiguousReferenceError as exc:
             return self._respond(
@@ -121,7 +135,9 @@ class ConversationService:
         if not registry.is_allowed(action.action):
             raise UnknownActionError(action.action)
 
-        outcome = await self._dispatch(current_user, action)
+        outcome = await self._dispatch(
+            current_user, action, world, timezone_name
+        )
         return self._respond(outcome)
 
     def _respond(self, outcome: Outcome) -> ConversationResponse:
@@ -141,7 +157,11 @@ class ConversationService:
     _RECALL_MAX = 10
 
     async def _dispatch(
-        self, current_user: User, action: ResolvedAction
+        self,
+        current_user: User,
+        action: ResolvedAction,
+        world: WorldView,
+        timezone_name: str | None = None,
     ) -> Outcome:
         if action.action == registry.PROJECT_LIST:
             projects = await self._projects.list_projects(current_user)
@@ -185,19 +205,19 @@ class ConversationService:
 
         if action.action == registry.ACTIVITY_RECALL:
             activities = await self._activity.list_activities(current_user)
-            recent = self._window_recent(activities)
-            facts = tuple(
-                RecallFact(
-                    event_type=a.event_type,
-                    entity_label=self._entity_label(a),
-                )
-                for a in recent
-            )
+            if action.recall_window == "yesterday":
+                selected = self._window_yesterday(activities, timezone_name)
+                recall_window = "yesterday"
+            else:
+                selected = self._window_recent(activities)
+                recall_window = "recent"
+            facts = self._recall_facts(selected, world)
             return Outcome(
                 kind="activity_recall",
                 executed=True,
                 action=action.action,
                 recall_facts=facts,
+                recall_window=recall_window,
             )
 
         # Registry membership was checked upstream; reaching here is a bug.
@@ -224,14 +244,77 @@ class ConversationService:
         within.sort(key=lambda a: _aware(a.created_at), reverse=True)
         return within[: self._RECALL_MAX]
 
-    def _entity_label(self, activity: Activity) -> str:
+    def _window_yesterday(
+        self, activities: list[Activity], timezone_name: str | None
+    ) -> list[Activity]:
+        """Return activity from the user's local calendar yesterday.
+
+        The browser may send an invalid or missing IANA timezone. v0.1 uses
+        UTC as the explicit fallback so the result stays deterministic instead
+        of guessing a location.
+        """
+        try:
+            user_tz = (
+                ZoneInfo(timezone_name)
+                if timezone_name
+                else timezone.utc
+            )
+        except ZoneInfoNotFoundError:
+            user_tz = timezone.utc
+
+        now_local = datetime.now(timezone.utc).astimezone(user_tz)
+        yesterday = now_local.date() - timedelta(days=1)
+        start_local = datetime.combine(
+            yesterday, datetime.min.time(), tzinfo=user_tz
+        )
+        end_local = start_local + timedelta(days=1)
+        start_utc = start_local.astimezone(timezone.utc)
+        end_utc = end_local.astimezone(timezone.utc)
+
+        def _aware_utc(dt: datetime) -> datetime:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        within = [
+            a
+            for a in activities
+            if a.created_at is not None
+            and start_utc <= _aware_utc(a.created_at) < end_utc
+        ]
+        within.sort(key=lambda a: _aware_utc(a.created_at), reverse=True)
+        return within[: self._RECALL_MAX]
+
+    def _recall_facts(
+        self, activities: list[Activity], world: WorldView
+    ) -> tuple[RecallFact, ...]:
+        return tuple(
+            RecallFact(
+                event_type=a.event_type,
+                entity_type=a.entity_type,
+                entity_label=self._entity_label(a, world),
+            )
+            for a in activities
+        )
+
+    def _entity_label(
+        self, activity: Activity, world: WorldView
+    ) -> str | None:
         """A human label for the entity an event concerned. Prefers a title
-        carried in the payload; falls back to the soft entity reference so
-        recall never depends on a payload shape it cannot guarantee."""
+        carried in the payload, then resolves against the WorldView. If the
+        entity is no longer resolvable, returns None so the responder can use
+        a neutral phrase without leaking storage identifiers."""
         payload = activity.payload or {}
         for key in ("title", "task_title", "name"):
             value = payload.get(key)
             if isinstance(value, str) and value:
                 return value
-        short = str(activity.entity_id)[:8]
-        return f"{activity.entity_type} {short}"
+        if activity.entity_type == "task":
+            for task in world.tasks:
+                if task.task_id == activity.entity_id:
+                    return task.title
+        if activity.entity_type == "project":
+            for project in world.projects:
+                if project.project_id == activity.entity_id:
+                    return project.name
+        return None

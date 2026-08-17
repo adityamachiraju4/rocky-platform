@@ -75,3 +75,14 @@ export interface Activity {
   payload: Record<string, unknown>;
   created_at: ISODateTime;
 }
+
+export interface ConversationRequest {
+  message: string;
+  timezone?: string | null;
+}
+
+export interface ConversationResponse {
+  executed: boolean;
+  action: string | null;
+  reply: string;
+}

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -37,6 +39,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.dependencies import get_session
 from app.db.base import Base
 from app.main import app as fastapi_app
+from app.models.activity import Activity
 from app.models.user import User
 
 import app.models  # noqa: F401  (populate Base.metadata before create_all)
@@ -174,6 +177,59 @@ async def _get_task(
     return resp.json()
 
 
+async def _set_activity_created_at(
+    sessionmaker: async_sessionmaker,
+    activity_id: str,
+    created_at: datetime,
+) -> None:
+    async with sessionmaker() as s:
+        await s.execute(
+            update(Activity)
+            .where(Activity.id == uuid.UUID(activity_id))
+            .values(created_at=created_at)
+        )
+        await s.commit()
+
+
+async def _record_activity(
+    sessionmaker: async_sessionmaker,
+    *,
+    user_id: str,
+    event_type: str,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    created_at: datetime,
+    payload: dict | None = None,
+) -> str:
+    async with sessionmaker() as s:
+        activity = Activity(
+            user_id=uuid.UUID(user_id),
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            payload=payload or {},
+            created_at=created_at,
+        )
+        s.add(activity)
+        await s.commit()
+        return str(activity.id)
+
+
+def _local_datetime_for_day_offset(
+    timezone_name: str,
+    day_offset: int,
+    at_time: time,
+) -> datetime:
+    user_tz = ZoneInfo(timezone_name)
+    target_date = (
+        datetime.now(timezone.utc).astimezone(user_tz).date()
+        + timedelta(days=day_offset)
+    )
+    return datetime.combine(target_date, at_time, tzinfo=user_tz).astimezone(
+        timezone.utc
+    )
+
+
 # --------------------------------------------------------------------------
 # Happy path: the proof loop.
 # --------------------------------------------------------------------------
@@ -210,6 +266,72 @@ async def test_complete_task_via_conversation_emits_completed(ctx) -> None:
     completed = [a for a in activity if a["event_type"] == "task.completed"]
     assert len(completed) == 1
     assert completed[0]["entity_id"] == task["id"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Finish the homepage task",
+        "Finish homepage",
+        "Complete the homepage task",
+        "Mark the homepage task complete",
+        "Homepage is done",
+        "I finished the homepage task",
+        "Finished the homepage task",
+        "Hey Rocky, finish the homepage task",
+        "Hey OK finished the homepage task",
+    ],
+)
+@pytest.mark.asyncio
+async def test_completion_phrases_resolve_to_task_update(
+    ctx, message: str
+) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Rocky Platform")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": message},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.update"
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "complete"
+    activity = await _get_activity(client, headers)
+    completed = [a for a in activity if a["event_type"] == "task.completed"]
+    assert len(completed) == 1
+    assert completed[0]["entity_id"] == task["id"]
+
+
+@pytest.mark.asyncio
+async def test_live_homepage_phrase_matches_task_title_containing_homepage(
+    ctx,
+) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="TestDev")
+    task = await _make_task(
+        client, headers, project_id, title="Create the homepage"
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "Hey Rocky finish the homepage task"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.update"
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "complete"
 
 
 # --------------------------------------------------------------------------
@@ -275,9 +397,60 @@ async def test_no_match_does_not_mutate(ctx) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["executed"] is False
+    assert body["action"] is None
+    assert (
+        body["reply"]
+        == "I understood that you want to finish a task, but I couldn't "
+        "find an active task called 'nonexistent thing'."
+    )
 
     fetched = await _get_task(client, headers, project_id, task["id"])
     assert fetched["status"] == "active"
+    activity = await _get_activity(client, headers)
+    assert not [a for a in activity if a["event_type"] == "task.completed"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_intent_is_distinct_from_missing_task(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "flarb the moon cabbage"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "I'm not sure what you want me to do."
+
+
+@pytest.mark.asyncio
+async def test_completion_ignores_already_completed_task(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Done")
+    task = await _make_task(
+        client, headers, project_id, title="Homepage", status="complete"
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "finish homepage"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["reply"] == (
+        "I understood that you want to finish a task, but I couldn't find "
+        "an active task called 'homepage'."
+    )
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "complete"
     activity = await _get_activity(client, headers)
     assert not [a for a in activity if a["event_type"] == "task.completed"]
 
@@ -416,6 +589,54 @@ async def test_recall_narrates_real_activity(ctx) -> None:
     # Grounded: it names events that really happened, and nothing it invents.
     assert "completed" in reply
     assert "created" in reply
+    assert "project.created" not in reply
+    assert "task.completed" not in reply
+
+
+@pytest.mark.asyncio
+async def test_recall_uses_resolved_task_name_instead_of_id(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Rocky")
+    task = await _make_task(
+        client, headers, project_id, title="Need to work on rocky"
+    )
+
+    upd = await client.patch(
+        f"/projects/{project_id}/tasks/{task['id']}",
+        json={"status": "complete"},
+        headers=headers,
+    )
+    assert upd.status_code == 200, upd.text
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "where did we leave off"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    reply = resp.json()["reply"]
+    assert "completed 'Need to work on rocky'" in reply
+    assert task["id"] not in reply
+    assert task["id"][:8] not in reply
+    assert "task " + task["id"][:8] not in reply
+
+
+@pytest.mark.asyncio
+async def test_recall_humanizes_project_created(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await _make_project(client, headers, name="TestDev")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "where did we leave off"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    reply = resp.json()["reply"]
+    assert "created the 'TestDev' project" in reply
+    assert "project.created" not in reply
 
 
 @pytest.mark.asyncio
@@ -469,6 +690,135 @@ async def test_recall_execute_recall_continuity(ctx) -> None:
     second_reply = second.json()["reply"]
     assert second_reply.startswith("Recently:")
     assert "completed" in second_reply
+    assert "task.completed" not in second_reply
+
+
+@pytest.mark.asyncio
+async def test_yesterday_recall_uses_user_local_calendar_day(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Calendar")
+    yesterday_task = await _make_task(
+        client, headers, project_id, title="yesterday item"
+    )
+    today_task = await _make_task(
+        client, headers, project_id, title="today item"
+    )
+
+    activity = await _get_activity(client, headers)
+    by_entity = {a["entity_id"]: a for a in activity}
+    await _set_activity_created_at(
+        sessionmaker,
+        by_entity[yesterday_task["id"]]["id"],
+        _local_datetime_for_day_offset(
+            "America/Los_Angeles", -1, time(hour=10)
+        ),
+    )
+    await _set_activity_created_at(
+        sessionmaker,
+        by_entity[today_task["id"]]["id"],
+        _local_datetime_for_day_offset(
+            "America/Los_Angeles", 0, time(hour=10)
+        ),
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={
+            "message": "What did I do yesterday?",
+            "timezone": "America/Los_Angeles",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "activity.recall"
+    assert body["reply"].startswith("Yesterday:")
+    assert not body["reply"].startswith("Recently:")
+    assert "yesterday item" in body["reply"]
+    assert "today item" not in body["reply"]
+
+
+@pytest.mark.asyncio
+async def test_yesterday_recall_is_honest_when_empty(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Calendar")
+    task = await _make_task(client, headers, project_id, title="today only")
+    activity = await _get_activity(client, headers)
+    created = next(a for a in activity if a["entity_id"] == task["id"])
+    await _set_activity_created_at(
+        sessionmaker,
+        created["id"],
+        _local_datetime_for_day_offset("Asia/Kolkata", 0, time(hour=10)),
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={
+            "message": "What did I do yesterday?",
+            "timezone": "Asia/Kolkata",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert (
+        resp.json()["reply"]
+        == "I don't have any activity from yesterday recorded."
+    )
+
+
+@pytest.mark.asyncio
+async def test_yesterday_recall_invalid_timezone_falls_back_to_utc(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Calendar")
+    task = await _make_task(client, headers, project_id, title="utc item")
+    activity = await _get_activity(client, headers)
+    created = next(a for a in activity if a["entity_id"] == task["id"])
+    await _set_activity_created_at(
+        sessionmaker,
+        created["id"],
+        _local_datetime_for_day_offset("UTC", -1, time(hour=10)),
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={
+            "message": "What did I do yesterday?",
+            "timezone": "Not/AZone",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert "utc item" in resp.json()["reply"]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_recall_entity_never_leaks_identifier(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    orphan_id = uuid.uuid4()
+    await _record_activity(
+        sessionmaker,
+        user_id=user_id,
+        event_type="task.completed",
+        entity_type="task",
+        entity_id=orphan_id,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "where did we leave off"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    reply = resp.json()["reply"]
+    assert "completed a task" in reply
+    assert str(orphan_id) not in reply
+    assert str(orphan_id)[:8] not in reply
 
 
 # --------------------------------------------------------------------------

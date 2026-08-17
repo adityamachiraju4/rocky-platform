@@ -20,7 +20,7 @@ LlmResponder. The template says what happened; it does not interpret.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 # Outcome kinds. Each maps to one rendering branch in the responder.
@@ -30,6 +30,7 @@ OutcomeKind = Literal[
     "task_updated",
     "activity_recall",
     "no_match",
+    "target_not_found",
     "ambiguous",
 ]
 
@@ -40,7 +41,8 @@ class RecallFact:
     entity it concerned. Built by the dispatch from real Activity rows."""
 
     event_type: str
-    entity_label: str
+    entity_type: str
+    entity_label: str | None
 
 
 @dataclass(frozen=True)
@@ -67,8 +69,10 @@ class Outcome:
     task_status: str | None = None
     # activity_recall
     recall_facts: tuple[RecallFact, ...] = ()
+    recall_window: Literal["recent", "yesterday"] = "recent"
     # no_match / ambiguous
     candidates: tuple[str, ...] = ()
+    target: str | None = None
 
 
 class Responder(Protocol):
@@ -78,14 +82,29 @@ class Responder(Protocol):
     def render(self, outcome: Outcome) -> str: ...
 
 
-# Human phrasing for the event types recall narrates. Unknown types fall back
-# to the raw event name, so a new event never crashes recall -- it just reads
-# literally until phrasing is added here.
-_EVENT_VERB: dict[str, str] = {
-    "task.created": "created",
-    "task.completed": "completed",
-    "task.updated": "updated",
-}
+def _quoted(value: str | None) -> str:
+    return f"'{value}'" if value else ""
+
+
+def _recall_phrase(fact: RecallFact) -> str:
+    label = _quoted(fact.entity_label)
+
+    if fact.event_type == "project.created":
+        return f"created the {label} project" if label else "created a project"
+    if fact.event_type == "project.updated":
+        return f"updated the {label} project" if label else "updated a project"
+    if fact.event_type == "task.created":
+        return f"created the task {label}" if label else "created a task"
+    if fact.event_type == "task.completed":
+        return f"completed {label}" if label else "completed a task"
+    if fact.event_type == "task.updated":
+        return f"updated the task {label}" if label else "updated a task"
+
+    if fact.entity_type == "project":
+        return f"updated the {label} project" if label else "updated a project"
+    if fact.entity_type == "task":
+        return f"updated the task {label}" if label else "updated a task"
+    return "recorded activity"
 
 
 class TemplateResponder:
@@ -116,15 +135,30 @@ class TemplateResponder:
 
         if outcome.kind == "activity_recall":
             if not outcome.recall_facts:
+                if outcome.recall_window == "yesterday":
+                    return "I don't have any activity from yesterday recorded."
                 return "I don't have any recent activity recorded."
-            parts = []
-            for f_ in outcome.recall_facts:
-                verb = _EVENT_VERB.get(f_.event_type, f_.event_type)
-                parts.append(f"{verb} '{f_.entity_label}'")
-            return "Recently: " + ", ".join(parts) + "."
+            parts = [_recall_phrase(f_) for f_ in outcome.recall_facts]
+            prefix = (
+                "Yesterday"
+                if outcome.recall_window == "yesterday"
+                else "Recently"
+            )
+            return prefix + ": " + ", ".join(parts) + "."
 
         if outcome.kind == "no_match":
-            return "I couldn't find anything matching that."
+            return "I'm not sure what you want me to do."
+
+        if outcome.kind == "target_not_found":
+            if outcome.target:
+                return (
+                    "I understood that you want to finish a task, but I "
+                    f"couldn't find an active task called '{outcome.target}'."
+                )
+            return (
+                "I understood that you want to finish a task, but I couldn't "
+                "find an active task to complete."
+            )
 
         if outcome.kind == "ambiguous":
             listed = "\n".join(f"- {c}" for c in outcome.candidates)

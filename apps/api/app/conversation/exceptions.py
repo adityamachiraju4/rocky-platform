@@ -36,6 +36,15 @@ class NoMatchError(ConversationError):
         self.message = message
 
 
+class CompletionTargetNotFoundError(ConversationError):
+    """The message clearly asked to complete a task, but no active task
+    matched the extracted task reference. Nothing is mutated."""
+
+    def __init__(self, target: str) -> None:
+        super().__init__(f"No active task match for: {target}")
+        self.target = target
+
+
 class AmbiguousReferenceError(ConversationError):
     """The message matched more than one entity.
 

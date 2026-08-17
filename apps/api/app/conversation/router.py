@@ -27,7 +27,11 @@ async def converse(
     service: ConversationServiceDep,
 ) -> ConversationResponse:
     try:
-        return await service.handle(current_user, payload.message)
+        return await service.handle(
+            current_user,
+            payload.message,
+            timezone_name=payload.timezone,
+        )
     except UnknownActionError as exc:
         # The resolver proposed something outside the closed registry. This is
         # never the caller's fault; surface it as an internal error.
