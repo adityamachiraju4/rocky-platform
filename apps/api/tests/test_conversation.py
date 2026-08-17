@@ -46,12 +46,41 @@ import app.models  # noqa: F401  (populate Base.metadata before create_all)
 
 from app.conversation.service import ConversationService
 from app.conversation.exceptions import UnknownActionError
+from app.conversation.dependencies import get_understanding_provider
 from app.conversation.resolver import Resolver, WorldView
 from app.conversation.schemas import ResolvedAction
+from app.conversation.understanding import (
+    ActionProposal,
+    ConversationTurn,
+    UNDERSTANDING_JSON_SCHEMA,
+    UnderstandingProviderError,
+    UnderstandingResult,
+    Unsupported,
+)
 
 SECRET = "test-secret-key"
 PEPPER = "test-refresh-pepper"
 PASSWORD = "correct horse battery"
+
+
+class _FakeUnderstandingProvider:
+    def __init__(self, result: object | Exception) -> None:
+        self._result = result
+        self.calls: list[dict[str, object]] = []
+
+    async def understand(self, **_: object) -> object:
+        self.calls.append(_)
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def _use_fake_provider(result: object | Exception) -> _FakeUnderstandingProvider:
+    provider = _FakeUnderstandingProvider(result)
+    fastapi_app.dependency_overrides[get_understanding_provider] = (
+        lambda: provider
+    )
+    return provider
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +89,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALGORITHM", "HS256")
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
     monkeypatch.setenv("REFRESH_TOKEN_PEPPER", PEPPER)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 @pytest_asyncio.fixture
@@ -86,6 +116,7 @@ async def ctx() -> AsyncIterator[tuple[httpx.AsyncClient, async_sessionmaker]]:
             yield ac, sessionmaker
     finally:
         fastapi_app.dependency_overrides.pop(get_session, None)
+        fastapi_app.dependency_overrides.pop(get_understanding_provider, None)
         await engine.dispose()
 
 
@@ -235,6 +266,14 @@ def _local_datetime_for_day_offset(
 # --------------------------------------------------------------------------
 
 
+def test_understanding_schema_is_strict_responses_api_shape() -> None:
+    properties = UNDERSTANDING_JSON_SCHEMA["properties"]
+
+    assert UNDERSTANDING_JSON_SCHEMA["additionalProperties"] is False
+    assert set(UNDERSTANDING_JSON_SCHEMA["required"]) == set(properties)
+    assert "null" in properties["reply"]["type"]
+
+
 @pytest.mark.asyncio
 async def test_complete_task_via_conversation_emits_completed(ctx) -> None:
     client, sessionmaker = ctx
@@ -329,6 +368,319 @@ async def test_live_homepage_phrase_matches_task_title_containing_homepage(
     body = resp.json()
     assert body["executed"] is True
     assert body["action"] == "task.update"
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_provider_backed_natural_completion_executes_safely(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="homepage",
+            arguments={"status": "complete"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Rocky")
+    task = await _make_task(
+        client, headers, project_id, title="Create the homepage"
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "Yeah Rocky, we're done with the homepage."},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.update"
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "complete"
+    activity = await _get_activity(client, headers)
+    completed = [a for a in activity if a["event_type"] == "task.completed"]
+    assert len(completed) == 1
+    assert completed[0]["entity_id"] == task["id"]
+
+
+@pytest.mark.asyncio
+async def test_provider_backed_conversation_does_not_mutate(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Yes. I can hear you.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Talk")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "Hello Rocky, can you hear me?"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "Yes. I can hear you."
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["message"] == "Hello Rocky, can you hear me?"
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_uses_provider_for_conversation_miss(
+    ctx,
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Yes. I can hear you.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "Hello can you hear me"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "Yes. I can hear you."
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["message"] == "Hello can you hear me"
+
+
+@pytest.mark.asyncio
+async def test_provider_unknown_action_is_rejected(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(kind="action", action="system.delete_everything")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Safe")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "delete everything"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["reply"] == "I can't do that yet."
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_degrades_without_mutation(ctx) -> None:
+    _use_fake_provider(UnderstandingProviderError("boom"))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Fallback")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "That homepage thing is finished."},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_malformed_provider_result_fails_closed(ctx) -> None:
+    _use_fake_provider(object())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Malformed")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "That homepage thing is finished."},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "I'm not sure what you want me to do."
+
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_provider_recall_uses_activity_responder(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="activity.recall",
+            recall_window="yesterday",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Recall")
+    task = await _make_task(client, headers, project_id, title="yesterday")
+    activity = await _get_activity(client, headers)
+    created = next(a for a in activity if a["entity_id"] == task["id"])
+    await _set_activity_created_at(
+        sessionmaker,
+        created["id"],
+        _local_datetime_for_day_offset("UTC", -1, time(hour=10)),
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "What were we working on yesterday?"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "activity.recall"
+    assert body["reply"].startswith("Yesterday:")
+    assert "task.created" not in body["reply"]
+
+
+@pytest.mark.asyncio
+async def test_provider_missing_entity_does_not_mutate(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="homepage",
+            arguments={"status": "complete"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "I finished the homepage."},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert "couldn't find an active task" in body["reply"]
+
+
+@pytest.mark.asyncio
+async def test_provider_ambiguous_entity_does_not_mutate(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="homepage",
+            arguments={"status": "complete"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Ambiguous")
+    await _make_task(client, headers, project_id, title="homepage hero")
+    await _make_task(client, headers, project_id, title="homepage footer")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "That homepage thing is complete."},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is False
+    assert "several" in body["reply"].lower()
+
+
+@pytest.mark.asyncio
+async def test_provider_cannot_bypass_ownership(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="homepage",
+            arguments={"status": "complete"},
+        )
+    )
+    client, sessionmaker = ctx
+    owner_headers, _ = await _auth_headers(client, sessionmaker)
+    other_headers, _ = await _auth_headers(client, sessionmaker)
+    owner_project = await _make_project(
+        client, owner_headers, name="Owner"
+    )
+    owner_task = await _make_task(
+        client, owner_headers, owner_project, title="Homepage"
+    )
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "I finished the homepage."},
+        headers=other_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["executed"] is False
+
+    fetched = await _get_task(
+        client, owner_headers, owner_project, owner_task["id"]
+    )
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_contextual_reference_can_complete_last_grounded_task(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Context")
+    task = await _make_task(
+        client, headers, project_id, title="Create the homepage"
+    )
+
+    _use_fake_provider(
+        ConversationTurn(kind="conversation", reference="homepage")
+    )
+    first = await client.post(
+        "/conversation",
+        json={"message": "What about the homepage?"},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    assert "still active" in first.json()["reply"]
+
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="that",
+            arguments={"status": "complete"},
+        )
+    )
+    second = await client.post(
+        "/conversation",
+        json={"message": "That's done too."},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["executed"] is True
 
     fetched = await _get_task(client, headers, project_id, task["id"])
     assert fetched["status"] == "complete"

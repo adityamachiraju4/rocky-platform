@@ -17,6 +17,7 @@ aiosqlite==0.22.1         # in-memory SQLite driver (test data layer)
 pydantic==2.13.4
 email-validator==2.3.0    # required by pydantic EmailStr
 python-dotenv==1.2.2
+openai==2.48.0
 
 # Auth / security
 pwdlib==0.3.0             # Argon2id password hashing

@@ -9,6 +9,9 @@ Environment variables
 ---------------------
 * ``SESSION_TTL_DAYS`` — session lifetime in days (default ``30``).
 * ``REFRESH_TOKEN_TTL_DAYS`` — refresh-token lifetime in days (default ``30``).
+* ``OPENAI_API_KEY`` — optional key for model-backed understanding.
+* ``OPENAI_MODEL`` — optional OpenAI Responses model for understanding.
+* ``OPENAI_TIMEOUT_SECONDS`` — optional provider timeout.
 """
 from __future__ import annotations
 
@@ -38,6 +41,8 @@ class MissingConfigurationError(RuntimeError):
 
 _DEFAULT_SESSION_TTL_DAYS = 30
 _DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30
+_DEFAULT_OPENAI_MODEL = "gpt-5-nano"
+_DEFAULT_OPENAI_TIMEOUT_SECONDS = 4.0
 _MISSING = object()
 
 
@@ -78,6 +83,29 @@ def get_refresh_token_pepper() -> bytes:
     return raw.encode("utf-8")
 
 
+def get_openai_api_key() -> str | None:
+    raw = os.getenv("OPENAI_API_KEY")
+    if not raw:
+        return None
+    return raw
+
+
+def get_openai_model() -> str:
+    return os.getenv("OPENAI_MODEL") or _DEFAULT_OPENAI_MODEL
+
+
+def get_openai_timeout_seconds() -> float:
+    raw = os.getenv("OPENAI_TIMEOUT_SECONDS")
+    if not raw:
+        return _DEFAULT_OPENAI_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(
+            f"OPENAI_TIMEOUT_SECONDS must be numeric, got {raw!r}"
+        ) from exc
+
+
 # Convenience module-level constants, evaluated at import time. Functions
 # above remain the source of truth for callers that need late binding.
 SESSION_TTL: timedelta = get_session_ttl()
@@ -91,4 +119,7 @@ __all__ = [
     "get_session_ttl",
     "get_refresh_token_ttl",
     "get_refresh_token_pepper",
+    "get_openai_api_key",
+    "get_openai_model",
+    "get_openai_timeout_seconds",
 ]

@@ -20,6 +20,7 @@ Honest non-execution: a no-match or ambiguous reference returns
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,6 +35,10 @@ from app.tasks.schemas import TaskUpdate
 from app.activity.service import ActivityService
 
 from app.conversation import registry
+from app.conversation.context import (
+    ConversationContextStore,
+    GroundedTaskReference,
+)
 from app.conversation.exceptions import (
     AmbiguousReferenceError,
     CompletionTargetNotFoundError,
@@ -54,6 +59,17 @@ from app.conversation.responder import (
     Responder,
     TemplateResponder,
 )
+from app.conversation.understanding import (
+    Clarification,
+    ConversationTurn,
+    UnderstandingProvider,
+    UnderstandingProviderError,
+    UnderstandingResult,
+    Unsupported,
+    ActionProposal,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationService:
@@ -64,6 +80,8 @@ class ConversationService:
         session: AsyncSession,
         resolver: Resolver | None = None,
         responder: Responder | None = None,
+        understanding_provider: UnderstandingProvider | None = None,
+        context_store: ConversationContextStore | None = None,
     ) -> None:
         # One shared session across every composed service, so a dispatched
         # mutation and its Activity event commit atomically.
@@ -78,6 +96,8 @@ class ConversationService:
         # LlmResponder can swap in behind the Protocol without touching
         # dispatch. Defaults to the deterministic grounded template.
         self._responder: Responder = responder or TemplateResponder()
+        self._understanding_provider = understanding_provider
+        self._context_store = context_store
 
     async def _build_world(self, current_user: User) -> WorldView:
         projects = await self._projects.list_projects(current_user)
@@ -107,21 +127,32 @@ class ConversationService:
     ) -> ConversationResponse:
         world = await self._build_world(current_user)
 
-        # Resolver proposes; it executes nothing.
+        # Resolver proposes; it executes nothing. Deterministic handling stays
+        # first so obvious/offline cases never depend on a model provider.
         try:
             action = self._resolver.resolve(message, world)
         except NoMatchError:
-            return self._respond(
-                Outcome(kind="no_match", executed=False)
+            outcome = await self._try_provider(
+                current_user,
+                message,
+                world,
+                timezone_name,
+                fallback=Outcome(kind="no_match", executed=False),
             )
+            return self._respond(outcome)
         except CompletionTargetNotFoundError as exc:
-            return self._respond(
-                Outcome(
+            outcome = await self._try_provider(
+                current_user,
+                message,
+                world,
+                timezone_name,
+                fallback=Outcome(
                     kind="target_not_found",
                     executed=False,
                     target=exc.target,
-                )
+                ),
             )
+            return self._respond(outcome)
         except AmbiguousReferenceError as exc:
             return self._respond(
                 Outcome(
@@ -138,7 +169,125 @@ class ConversationService:
         outcome = await self._dispatch(
             current_user, action, world, timezone_name
         )
+        self._remember_outcome(current_user, outcome)
         return self._respond(outcome)
+
+    async def _try_provider(
+        self,
+        current_user: User,
+        message: str,
+        world: WorldView,
+        timezone_name: str | None,
+        fallback: Outcome,
+    ) -> Outcome:
+        if self._understanding_provider is None:
+            return fallback
+
+        self._current_context_task = (
+            self._context_store.get_last_task(current_user.id)
+            if self._context_store is not None
+            else None
+        )
+        try:
+            result = await self._understanding_provider.understand(
+                message=message,
+                world=world,
+                context=self._context_payload(current_user),
+            )
+        except UnderstandingProviderError as exc:
+            logger.warning(
+                "Conversation understanding provider failed",
+                extra={"provider_error_code": exc.code},
+            )
+            return fallback
+
+        outcome = await self._outcome_from_understanding(
+            current_user, result, world, timezone_name
+        )
+        self._remember_outcome(current_user, outcome)
+        return outcome
+
+    async def _outcome_from_understanding(
+        self,
+        current_user: User,
+        result: UnderstandingResult,
+        world: WorldView,
+        timezone_name: str | None,
+    ) -> Outcome:
+        if isinstance(result, ConversationTurn):
+            if result.reference:
+                try:
+                    task = self._resolve_task_reference(
+                        result.reference, world, require_active=False
+                    )
+                except CompletionTargetNotFoundError:
+                    return Outcome(
+                        kind="conversation",
+                        executed=False,
+                        reply=result.reply or "I couldn't find that task.",
+                    )
+                except AmbiguousReferenceError as exc:
+                    return Outcome(
+                        kind="ambiguous",
+                        executed=False,
+                        candidates=tuple(exc.candidates),
+                    )
+                return Outcome(
+                    kind="task_status",
+                    executed=False,
+                    task_title=task.title,
+                    task_status=task.status,
+                    project_name=task.project_name,
+                )
+            return Outcome(
+                kind="conversation",
+                executed=False,
+                reply=result.reply or "Yes. I can hear you.",
+            )
+
+        if isinstance(result, Clarification):
+            return Outcome(
+                kind="ambiguous",
+                executed=False,
+                candidates=result.candidates,
+            )
+
+        if isinstance(result, Unsupported):
+            return Outcome(
+                kind="unsupported",
+                executed=False,
+                reply=result.reason or "I can't do that yet.",
+            )
+
+        if not isinstance(result, ActionProposal):
+            return Outcome(kind="no_match", executed=False)
+
+        proposal = result
+        if not registry.is_allowed(proposal.action):
+            return Outcome(
+                kind="unsupported",
+                executed=False,
+                reply="I can't do that yet.",
+            )
+
+        try:
+            action = self._resolved_action_from_proposal(proposal, world)
+        except CompletionTargetNotFoundError as exc:
+            return Outcome(
+                kind="target_not_found",
+                executed=False,
+                target=exc.target,
+            )
+        except AmbiguousReferenceError as exc:
+            return Outcome(
+                kind="ambiguous",
+                executed=False,
+                candidates=tuple(exc.candidates),
+            )
+
+        return await self._dispatch(
+            current_user, action, world, timezone_name
+        )
 
     def _respond(self, outcome: Outcome) -> ConversationResponse:
         """Render an Outcome into the wire response. The reply string is
@@ -201,6 +350,14 @@ class ConversationService:
                 action=action.action,
                 task_title=task.title,
                 task_status=task.status,
+                project_name=next(
+                    (
+                        t.project_name
+                        for t in world.tasks
+                        if t.task_id == task.id
+                    ),
+                    None,
+                ),
             )
 
         if action.action == registry.ACTIVITY_RECALL:
@@ -222,6 +379,124 @@ class ConversationService:
 
         # Registry membership was checked upstream; reaching here is a bug.
         raise UnknownActionError(action.action)
+
+    def _resolved_action_from_proposal(
+        self, proposal: ActionProposal, world: WorldView
+    ) -> ResolvedAction:
+        if proposal.action == registry.TASK_UPDATE:
+            status = (proposal.arguments or {}).get("status")
+            if status != "complete":
+                raise CompletionTargetNotFoundError(
+                    proposal.reference or "that task"
+                )
+            task = self._resolve_task_reference(
+                proposal.reference, world, require_active=True
+            )
+            return ResolvedAction(
+                action=registry.TASK_UPDATE,
+                project_id=task.project_id,
+                task_id=task.task_id,
+                status="complete",
+            )
+
+        if proposal.action == registry.ACTIVITY_RECALL:
+            return ResolvedAction(
+                action=registry.ACTIVITY_RECALL,
+                recall_window=proposal.recall_window,
+            )
+
+        if proposal.action == registry.PROJECT_LIST:
+            return ResolvedAction(action=registry.PROJECT_LIST)
+
+        if proposal.action == registry.TASK_LIST:
+            project = self._resolve_project_reference(
+                proposal.reference, world
+            )
+            return ResolvedAction(
+                action=registry.TASK_LIST,
+                project_id=project.project_id,
+            )
+
+        raise UnknownActionError(proposal.action)
+
+    _PRONOUN_REFS = frozenset(
+        {"that", "it", "that one", "this", "this one", "that task"}
+    )
+
+    def _resolve_task_reference(
+        self,
+        reference: str | None,
+        world: WorldView,
+        *,
+        require_active: bool,
+    ) -> TaskRef:
+        target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS:
+            ctx = self._context_payload_user_task()
+            if ctx is not None:
+                target = ctx.title.lower()
+
+        if not target:
+            raise CompletionTargetNotFoundError("that task")
+
+        matches = [
+            t
+            for t in world.tasks
+            if (not require_active or t.status == "active")
+            and (target in t.title.lower() or t.title.lower() in target)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError(
+                [f"{m.title} ({m.project_name})" for m in matches]
+            )
+        raise CompletionTargetNotFoundError(target)
+
+    def _resolve_project_reference(
+        self, reference: str | None, world: WorldView
+    ) -> ProjectRef:
+        target = (reference or "").strip().lower()
+        matches = [
+            p
+            for p in world.projects
+            if target and (target in p.name.lower() or p.name.lower() in target)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([p.name for p in matches])
+        raise CompletionTargetNotFoundError(target or "that project")
+
+    def _context_payload(self, current_user: User) -> dict | None:
+        if self._context_store is None:
+            return None
+        ref = self._context_store.get_last_task(current_user.id)
+        if ref is None:
+            return None
+        return {
+            "last_grounded_entity": {
+                "kind": "task",
+                "title": ref.title,
+                "project": ref.project_name,
+            }
+        }
+
+    def _context_payload_user_task(self) -> GroundedTaskReference | None:
+        # Set transiently by _outcome_from_understanding for the current turn.
+        return getattr(self, "_current_context_task", None)
+
+    def _remember_outcome(self, current_user: User, outcome: Outcome) -> None:
+        if self._context_store is None:
+            return
+        if outcome.task_title and outcome.project_name:
+            self._context_store.set_last_task(
+                current_user.id,
+                GroundedTaskReference(
+                    title=outcome.task_title,
+                    project_name=outcome.project_name,
+                ),
+            )
 
     def _window_recent(
         self, activities: list[Activity]

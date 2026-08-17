@@ -27,11 +27,14 @@ from typing import Literal, Protocol
 OutcomeKind = Literal[
     "project_list",
     "task_list",
+    "task_status",
     "task_updated",
     "activity_recall",
+    "conversation",
     "no_match",
     "target_not_found",
     "ambiguous",
+    "unsupported",
 ]
 
 
@@ -64,6 +67,8 @@ class Outcome:
     # task_list
     task_total: int = 0
     task_active: int = 0
+    # task_status
+    project_name: str | None = None
     # task_updated
     task_title: str | None = None
     task_status: str | None = None
@@ -73,6 +78,7 @@ class Outcome:
     # no_match / ambiguous
     candidates: tuple[str, ...] = ()
     target: str | None = None
+    reply: str | None = None
 
 
 class Responder(Protocol):
@@ -128,9 +134,17 @@ class TemplateResponder:
                 f"{outcome.task_active} active."
             )
 
+        if outcome.kind == "task_status":
+            if not outcome.task_title:
+                return "I found that task, but I can't describe it yet."
+            if outcome.task_status == "active":
+                return f"'{outcome.task_title}' is still active."
+            return f"'{outcome.task_title}' is {outcome.task_status}."
+
         if outcome.kind == "task_updated":
             return (
-                f"Marked '{outcome.task_title}' as {outcome.task_status}."
+                f"Done -- I marked '{outcome.task_title}' "
+                f"{outcome.task_status}."
             )
 
         if outcome.kind == "activity_recall":
@@ -145,6 +159,9 @@ class TemplateResponder:
                 else "Recently"
             )
             return prefix + ": " + ", ".join(parts) + "."
+
+        if outcome.kind == "conversation":
+            return outcome.reply or "Yes. I'm here."
 
         if outcome.kind == "no_match":
             return "I'm not sure what you want me to do."
@@ -163,6 +180,12 @@ class TemplateResponder:
         if outcome.kind == "ambiguous":
             listed = "\n".join(f"- {c}" for c in outcome.candidates)
             return f"I found several matches:\n{listed}\nWhich one?"
+
+        if outcome.kind == "unsupported":
+            return (
+                outcome.reply
+                or "I can't do that yet."
+            )
 
         # Every OutcomeKind above is handled; reaching here is a bug.
         raise ValueError(f"unrenderable outcome kind: {outcome.kind}")
