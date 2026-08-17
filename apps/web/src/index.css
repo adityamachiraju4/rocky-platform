@@ -484,10 +484,27 @@ body {
   cursor: not-allowed;
 }
 .rocky-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   min-height: 20px;
   margin-top: 8px;
   color: var(--text-faint);
   font-size: 12px;
+}
+.rocky-stop {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: inherit;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.rocky-stop:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 .rocky-turn {
   display: grid;

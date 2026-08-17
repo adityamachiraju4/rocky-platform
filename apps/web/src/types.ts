@@ -86,3 +86,7 @@ export interface ConversationResponse {
   action: string | null;
   reply: string;
 }
+
+export interface SpeechRequest {
+  text: string;
+}

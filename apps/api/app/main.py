@@ -34,6 +34,7 @@ from app.projects.router import router as projects_router
 from app.tasks.router import router as tasks_router
 from app.activity.router import router as activity_router
 from app.conversation.router import router as conversation_router
+from app.speech.router import router as speech_router
 from app.db.session import get_engine, get_sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ app.include_router(projects_router)
 app.include_router(tasks_router)
 app.include_router(activity_router)
 app.include_router(conversation_router)
+app.include_router(speech_router)
 
 
 @app.get("/")

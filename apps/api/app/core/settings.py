@@ -12,6 +12,15 @@ Environment variables
 * ``OPENAI_API_KEY`` — optional key for model-backed understanding.
 * ``OPENAI_MODEL`` — optional OpenAI Responses model for understanding.
 * ``OPENAI_TIMEOUT_SECONDS`` — optional provider timeout.
+* ``OPENAI_TTS_API_KEY`` — optional official OpenAI key for speech rendering.
+* ``OPENAI_TTS_BASE_URL`` — optional speech API base URL.
+* ``OPENAI_TTS_MODEL`` — optional OpenAI speech model for spoken replies.
+* ``OPENAI_TTS_VOICE`` — optional Rocky identity voice.
+* ``OPENAI_TTS_SPEED`` — optional speech speed.
+* ``LOCAL_TTS_ENABLED`` — enable/disable local neural speech.
+* ``LOCAL_TTS_PROVIDER`` — local speech provider name.
+* ``LOCAL_TTS_VOICE`` — local Rocky audition/default voice.
+* ``LOCAL_TTS_SPEED`` — local speech speed.
 """
 from __future__ import annotations
 
@@ -43,6 +52,14 @@ _DEFAULT_SESSION_TTL_DAYS = 30
 _DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30
 _DEFAULT_OPENAI_MODEL = "gpt-5-nano"
 _DEFAULT_OPENAI_TIMEOUT_SECONDS = 4.0
+_DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1"
+_DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+_DEFAULT_OPENAI_TTS_VOICE = "cedar"
+_DEFAULT_OPENAI_TTS_SPEED = 0.95
+_DEFAULT_LOCAL_TTS_ENABLED = True
+_DEFAULT_LOCAL_TTS_PROVIDER = "kokoro"
+_DEFAULT_LOCAL_TTS_VOICE = "am_adam"
+_DEFAULT_LOCAL_TTS_SPEED = 0.95
 _MISSING = object()
 
 
@@ -106,6 +123,69 @@ def get_openai_timeout_seconds() -> float:
         ) from exc
 
 
+def get_openai_tts_api_key() -> str | None:
+    raw = os.getenv("OPENAI_TTS_API_KEY")
+    if raw:
+        return raw
+    if os.getenv("OPENAI_BASE_URL"):
+        return None
+    return get_openai_api_key()
+
+
+def get_openai_tts_base_url() -> str:
+    return os.getenv("OPENAI_TTS_BASE_URL") or _DEFAULT_OPENAI_TTS_BASE_URL
+
+
+def get_openai_tts_model() -> str:
+    raw = os.getenv("OPENAI_TTS_MODEL")
+    if not raw or raw == "gpt-4o-mini-tts-2025-12-15":
+        return _DEFAULT_OPENAI_TTS_MODEL
+    return raw
+
+
+def get_openai_tts_voice() -> str:
+    return os.getenv("OPENAI_TTS_VOICE") or _DEFAULT_OPENAI_TTS_VOICE
+
+
+def get_openai_tts_speed() -> float:
+    raw = os.getenv("OPENAI_TTS_SPEED")
+    if not raw:
+        return _DEFAULT_OPENAI_TTS_SPEED
+    try:
+        return float(raw)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(
+            f"OPENAI_TTS_SPEED must be numeric, got {raw!r}"
+        ) from exc
+
+
+def get_local_tts_enabled() -> bool:
+    raw = os.getenv("LOCAL_TTS_ENABLED")
+    if raw is None or raw == "":
+        return _DEFAULT_LOCAL_TTS_ENABLED
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_local_tts_provider() -> str:
+    return os.getenv("LOCAL_TTS_PROVIDER") or _DEFAULT_LOCAL_TTS_PROVIDER
+
+
+def get_local_tts_voice() -> str:
+    return os.getenv("LOCAL_TTS_VOICE") or _DEFAULT_LOCAL_TTS_VOICE
+
+
+def get_local_tts_speed() -> float:
+    raw = os.getenv("LOCAL_TTS_SPEED")
+    if not raw:
+        return _DEFAULT_LOCAL_TTS_SPEED
+    try:
+        return float(raw)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(
+            f"LOCAL_TTS_SPEED must be numeric, got {raw!r}"
+        ) from exc
+
+
 # Convenience module-level constants, evaluated at import time. Functions
 # above remain the source of truth for callers that need late binding.
 SESSION_TTL: timedelta = get_session_ttl()
@@ -122,4 +202,13 @@ __all__ = [
     "get_openai_api_key",
     "get_openai_model",
     "get_openai_timeout_seconds",
+    "get_openai_tts_api_key",
+    "get_openai_tts_base_url",
+    "get_openai_tts_model",
+    "get_openai_tts_voice",
+    "get_openai_tts_speed",
+    "get_local_tts_enabled",
+    "get_local_tts_provider",
+    "get_local_tts_voice",
+    "get_local_tts_speed",
 ]

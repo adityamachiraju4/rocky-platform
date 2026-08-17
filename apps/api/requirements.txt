@@ -18,6 +18,8 @@ pydantic==2.13.4
 email-validator==2.3.0    # required by pydantic EmailStr
 python-dotenv==1.2.2
 openai==2.48.0
+kokoro==0.9.4
+soundfile==0.14.0
 
 # Auth / security
 pwdlib==0.3.0             # Argon2id password hashing

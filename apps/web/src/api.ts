@@ -26,6 +26,7 @@ import type {
   TaskCreate,
   TaskUpdate,
   TokenResponse,
+  SpeechRequest,
 } from "./types";
 
 const BASE = "/api";
@@ -106,6 +107,12 @@ interface RequestOptions {
   auth?: boolean; // attach bearer + participate in refresh-on-401 (default true)
 }
 
+export interface BinaryResponse {
+  blob: Blob;
+  contentType: string;
+  status: number;
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, auth = true } = opts;
 
@@ -142,6 +149,51 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     throw new ApiError(res.status, parsed, detailMessage(parsed, `HTTP ${res.status}`));
   }
   return parsed as T;
+}
+
+async function requestBlob(
+  path: string,
+  opts: RequestOptions & { signal?: AbortSignal } = {},
+): Promise<BinaryResponse> {
+  const { method = "GET", body, auth = true, signal } = opts;
+
+  const doFetch = async (): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (auth) {
+      const token = getAccessToken();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+    }
+    return fetch(`${BASE}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  };
+
+  let res = await doFetch();
+
+  if (res.status === 401 && auth) {
+    const refreshed = await ensureRefresh();
+    if (!refreshed) throw new AuthExpiredError();
+    res = await doFetch();
+    if (res.status === 401) {
+      clearTokens();
+      throw new AuthExpiredError();
+    }
+  }
+
+  if (!res.ok) {
+    const parsed = await parseBody(res);
+    throw new ApiError(res.status, parsed, detailMessage(parsed, `HTTP ${res.status}`));
+  }
+
+  return {
+    blob: await res.blob(),
+    contentType: (res.headers.get("content-type") ?? "").split(";")[0],
+    status: res.status,
+  };
 }
 
 // ---- Auth ---------------------------------------------------------------
@@ -216,3 +268,9 @@ export const sendConversation = (
   body: ConversationRequest,
 ): Promise<ConversationResponse> =>
   request<ConversationResponse>("/conversation", { method: "POST", body });
+
+export const synthesizeSpeech = (
+  body: SpeechRequest,
+  signal?: AbortSignal,
+): Promise<BinaryResponse> =>
+  requestBlob("/speech", { method: "POST", body, signal });
