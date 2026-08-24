@@ -29,6 +29,17 @@ EventType = Literal[
     "task.created",
     "task.updated",
     "task.completed",
+    "reminder.created",
+    "reminder.due",
+    "reminder.completed",
+    "reminder.cancelled",
+    "note.created",
+    "note.updated",
+    "note.archived",
+    "list.created",
+    "list.archived",
+    "list.item_added",
+    "list.item_completed",
 ]
 
 

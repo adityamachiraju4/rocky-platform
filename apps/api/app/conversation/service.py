@@ -26,13 +26,28 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
 from app.models.activity import Activity
+from app.models.user import User
 
 from app.projects.service import ProjectsService
 from app.tasks.service import TasksService
 from app.tasks.schemas import TaskUpdate
 from app.activity.service import ActivityService
+from app.core.time import (
+    Clock,
+    TimeError,
+    ensure_utc,
+    resolve_timezone,
+    system_clock,
+)
+from app.reminders.interpretation import interpret_reminder_time
+from app.reminders.schemas import ReminderCreate
+from app.reminders.service import RemindersService
+from app.notifications.service import NotificationsService
+from app.notes.schemas import NoteCreate, NoteUpdate
+from app.notes.service import NotesService
+from app.lists.schemas import ListCreate, ListItemCreate, ListItemUpdate, ListUpdate
+from app.lists.service import ListsService
 
 from app.conversation import registry
 from app.conversation.context import (
@@ -48,6 +63,11 @@ from app.conversation.exceptions import (
 from app.conversation.resolver import (
     HardcodedResolver,
     ProjectRef,
+    NotificationRef,
+    NoteRef,
+    ListItemRef,
+    ListRef,
+    ReminderRef,
     Resolver,
     TaskRef,
     WorldView,
@@ -82,6 +102,7 @@ class ConversationService:
         responder: Responder | None = None,
         understanding_provider: UnderstandingProvider | None = None,
         context_store: ConversationContextStore | None = None,
+        clock: Clock = system_clock,
     ) -> None:
         # One shared session across every composed service, so a dispatched
         # mutation and its Activity event commit atomically.
@@ -89,6 +110,11 @@ class ConversationService:
         self._projects = ProjectsService(session)
         self._tasks = TasksService(session)
         self._activity = ActivityService(session)
+        self._clock = clock
+        self._reminders = RemindersService(session, clock=clock)
+        self._notifications = NotificationsService(session, clock=clock)
+        self._notes = NotesService(session, clock=clock)
+        self._lists = ListsService(session, clock=clock)
         # Resolver is injectable so tests can pin behavior; defaults to the
         # deterministic v1 brain.
         self._resolver: Resolver = resolver or HardcodedResolver()
@@ -117,7 +143,63 @@ class ConversationService:
                         status=t.status,
                     )
                 )
-        return WorldView(projects=project_refs, tasks=tuple(task_refs))
+        reminders = await self._reminders.list_reminders(current_user)
+        reminder_refs = tuple(
+            ReminderRef(
+                reminder_id=reminder.id,
+                title=reminder.title,
+                status=reminder.status,
+                due_at=reminder.due_at,
+                timezone=reminder.timezone,
+            )
+            for reminder in reminders
+        )
+        notifications = await self._notifications.list_notifications(current_user)
+        notification_refs = tuple(
+            NotificationRef(
+                notification_id=item.id,
+                title=item.title,
+                body=item.body,
+                status=item.status,
+                created_at=item.created_at,
+            )
+            for item in notifications
+        )
+        active_notes = await self._notes.list_notes(current_user, status="active")
+        archived_notes = await self._notes.list_notes(
+            current_user, status="archived"
+        )
+        note_refs = tuple(
+            NoteRef(
+                note_id=note.id,
+                title=note.title,
+                content=note.content,
+                status=note.status,
+            )
+            for note in (*active_notes, *archived_notes)
+        )
+        active_lists = await self._lists.list_lists(current_user, status="active")
+        archived_lists = await self._lists.list_lists(current_user, status="archived")
+        list_refs: list[ListRef] = []
+        for value in (*active_lists, *archived_lists):
+            items = await self._lists.list_items(current_user, value.id)
+            list_refs.append(
+                ListRef(
+                    list_id=value.id, title=value.title, status=value.status,
+                    items=tuple(
+                        ListItemRef(item_id=item.id, content=item.content, status=item.status)
+                        for item in items
+                    ),
+                )
+            )
+        return WorldView(
+            projects=project_refs,
+            tasks=tuple(task_refs),
+            reminders=reminder_refs,
+            notifications=notification_refs,
+            notes=note_refs,
+            lists=tuple(list_refs),
+        )
 
     async def handle(
         self,
@@ -150,6 +232,19 @@ class ConversationService:
                     kind="target_not_found",
                     executed=False,
                     target=exc.target,
+                    target_type=(
+                        "reminder"
+                        if "reminder" in message.lower()
+                        else (
+                            "notification"
+                            if "notification" in message.lower()
+                            else (
+                                "note" if "note" in message.lower() else "task"
+                                if "list" not in message.lower()
+                                else "list"
+                            )
+                        )
+                    ),
                 ),
             )
             return self._respond(outcome)
@@ -277,6 +372,41 @@ class ConversationService:
                 kind="target_not_found",
                 executed=False,
                 target=exc.target,
+                target_type=(
+                    "reminder"
+                    if result.action in {
+                        registry.REMINDER_COMPLETE,
+                        registry.REMINDER_CANCEL,
+                    }
+                    else (
+                        "notification"
+                        if result.action
+                        in {
+                            registry.NOTIFICATION_READ,
+                            registry.NOTIFICATION_DISMISS,
+                        }
+                        else (
+                            "note"
+                            if result.action
+                            in {
+                                registry.NOTE_CREATE,
+                                registry.NOTE_UPDATE,
+                                registry.NOTE_ARCHIVE,
+                            }
+                            else (
+                                "list"
+                                if result.action
+                                in {
+                                    registry.LIST_CREATE,
+                                    registry.LIST_ADD_ITEM,
+                                    registry.LIST_COMPLETE_ITEM,
+                                    registry.LIST_ARCHIVE,
+                                }
+                                else "task"
+                            )
+                        )
+                    )
+                ),
             )
         except AmbiguousReferenceError as exc:
             return Outcome(
@@ -322,7 +452,25 @@ class ConversationService:
             )
 
         if action.action == registry.TASK_LIST:
-            assert action.project_id is not None
+            if action.project_id is None:
+                active_refs = [
+                    t for t in world.tasks if t.status == "active"
+                ]
+                return Outcome(
+                    kind="task_list",
+                    executed=True,
+                    action=action.action,
+                    task_scope="all",
+                    task_total=len(world.tasks),
+                    task_active=len(active_refs),
+                    task_titles=tuple(t.title for t in active_refs[:5]),
+                    latest_completed_task_title=(
+                        await self._latest_completed_task_title(
+                            current_user, world
+                        )
+                    ),
+                )
+
             tasks = await self._tasks.list_tasks(
                 current_user, action.project_id
             )
@@ -331,8 +479,10 @@ class ConversationService:
                 kind="task_list",
                 executed=True,
                 action=action.action,
+                task_scope="project",
                 task_total=len(tasks),
                 task_active=len(active),
+                task_titles=tuple(t.title for t in active[:5]),
             )
 
         if action.action == registry.TASK_UPDATE:
@@ -377,15 +527,223 @@ class ConversationService:
                 recall_window=recall_window,
             )
 
+        if action.action == registry.REMINDER_CREATE:
+            assert action.reminder_title is not None
+            assert action.reminder_when is not None
+            try:
+                timezone_key = resolve_timezone(
+                    timezone_name or current_user.timezone
+                ).key
+                due_at = interpret_reminder_time(
+                    action.reminder_when, timezone_key, self._clock
+                )
+            except (TimeError, ValueError) as exc:
+                return Outcome(
+                    kind="unsupported",
+                    executed=False,
+                    reply=str(exc),
+                )
+            reminder = await self._reminders.create_reminder(
+                current_user,
+                ReminderCreate(
+                    title=action.reminder_title,
+                    due_at=due_at,
+                    timezone=timezone_key,
+                ),
+            )
+            return Outcome(
+                kind="reminder_created",
+                executed=True,
+                action=action.action,
+                reminder_title=reminder.title,
+                reminder_due_at=reminder.due_at,
+                reminder_timezone=reminder.timezone,
+            )
+
+        if action.action == registry.REMINDER_LIST:
+            reminders = await self._reminders.list_reminders(current_user)
+            open_reminders = [
+                reminder
+                for reminder in reminders
+                if reminder.status in {"scheduled", "due"}
+            ]
+            return Outcome(
+                kind="reminder_list",
+                executed=True,
+                action=action.action,
+                reminders=tuple(
+                    (
+                        reminder.title,
+                        reminder.due_at,
+                        reminder.timezone,
+                        reminder.status,
+                    )
+                    for reminder in open_reminders
+                ),
+            )
+
+        if action.action in {
+            registry.REMINDER_COMPLETE,
+            registry.REMINDER_CANCEL,
+        }:
+            assert action.reminder_id is not None
+            if action.action == registry.REMINDER_COMPLETE:
+                reminder = await self._reminders.complete_reminder(
+                    current_user, action.reminder_id
+                )
+            else:
+                reminder = await self._reminders.cancel_reminder(
+                    current_user, action.reminder_id
+                )
+            return Outcome(
+                kind="reminder_updated",
+                executed=True,
+                action=action.action,
+                reminder_title=reminder.title,
+                reminder_status=reminder.status,
+            )
+
+        if action.action == registry.NOTIFICATION_LIST:
+            notifications = await self._notifications.list_notifications(
+                current_user, status=action.notification_status
+            )
+            visible = [item for item in notifications if item.status != "dismissed"]
+            return Outcome(
+                kind="notification_list",
+                executed=True,
+                action=action.action,
+                notifications=tuple(
+                    (item.title, item.body, item.status) for item in visible
+                ),
+            )
+
+        if action.action in {
+            registry.NOTIFICATION_READ,
+            registry.NOTIFICATION_DISMISS,
+        }:
+            assert action.notification_id is not None
+            if action.action == registry.NOTIFICATION_READ:
+                notification = await self._notifications.mark_read(
+                    current_user, action.notification_id
+                )
+            else:
+                notification = await self._notifications.dismiss(
+                    current_user, action.notification_id
+                )
+            return Outcome(
+                kind="notification_updated",
+                executed=True,
+                action=action.action,
+                notification_title=notification.title,
+                notification_status=notification.status,
+            )
+
+        if action.action == registry.NOTE_CREATE:
+            assert action.note_title is not None
+            note = await self._notes.create_note(
+                current_user,
+                NoteCreate(
+                    title=action.note_title,
+                    content=action.note_content or "",
+                ),
+            )
+            return Outcome(
+                kind="note_created",
+                executed=True,
+                action=action.action,
+                note_title=note.title,
+            )
+
+        if action.action == registry.NOTE_LIST:
+            note_status = action.note_status or "active"
+            notes = await self._notes.list_notes(
+                current_user, status=note_status
+            )
+            return Outcome(
+                kind="note_list",
+                executed=True,
+                action=action.action,
+                note_status=note_status,
+                notes=tuple((note.title, note.content) for note in notes),
+            )
+
+        if action.action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
+            assert action.note_id is not None
+            data = (
+                NoteUpdate(status="archived")
+                if action.action == registry.NOTE_ARCHIVE
+                else NoteUpdate.model_validate(
+                    {
+                        key: value
+                        for key, value in {
+                            "title": action.note_title,
+                            "content": action.note_content,
+                        }.items()
+                        if value is not None
+                    }
+                )
+            )
+            note = await self._notes.update_note(
+                current_user, action.note_id, data
+            )
+            return Outcome(
+                kind="note_updated",
+                executed=True,
+                action=action.action,
+                note_title=note.title,
+                note_status=note.status,
+            )
+
+        if action.action == registry.LIST_CREATE:
+            assert action.list_title is not None
+            value = await self._lists.create_list(
+                current_user, ListCreate(title=action.list_title)
+            )
+            return Outcome(kind="list_created", executed=True, action=action.action,
+                           list_title=value.title)
+        if action.action == registry.LIST_LIST:
+            values = await self._lists.list_lists(current_user)
+            return Outcome(kind="list_list", executed=True, action=action.action,
+                           list_titles=tuple(value.title for value in values))
+        if action.action == registry.LIST_ADD_ITEM:
+            assert action.list_id is not None and action.list_item_content is not None
+            item = await self._lists.create_item(
+                current_user, action.list_id,
+                ListItemCreate(content=action.list_item_content),
+            )
+            return Outcome(kind="list_item_added", executed=True, action=action.action,
+                           list_title=action.list_title, list_item_content=item.content)
+        if action.action == registry.LIST_COMPLETE_ITEM:
+            assert action.list_id is not None and action.list_item_id is not None
+            item = await self._lists.update_item(
+                current_user, action.list_id, action.list_item_id,
+                ListItemUpdate(status="complete"),
+            )
+            return Outcome(kind="list_item_completed", executed=True, action=action.action,
+                           list_title=action.list_title, list_item_content=item.content)
+        if action.action == registry.LIST_ARCHIVE:
+            assert action.list_id is not None
+            value = await self._lists.update_list(
+                current_user, action.list_id, ListUpdate(status="archived")
+            )
+            return Outcome(kind="list_archived", executed=True, action=action.action,
+                           list_title=value.title)
+
         # Registry membership was checked upstream; reaching here is a bug.
         raise UnknownActionError(action.action)
 
     def _resolved_action_from_proposal(
         self, proposal: ActionProposal, world: WorldView
     ) -> ResolvedAction:
+        arguments = proposal.arguments or {}
+        if (
+            proposal.action != registry.ACTIVITY_RECALL
+            and proposal.recall_window is not None
+        ):
+            raise CompletionTargetNotFoundError("that action")
+
         if proposal.action == registry.TASK_UPDATE:
-            status = (proposal.arguments or {}).get("status")
-            if status != "complete":
+            if set(arguments) != {"status"} or arguments.get("status") != "complete":
                 raise CompletionTargetNotFoundError(
                     proposal.reference or "that task"
                 )
@@ -400,15 +758,23 @@ class ConversationService:
             )
 
         if proposal.action == registry.ACTIVITY_RECALL:
+            if arguments or proposal.reference:
+                raise CompletionTargetNotFoundError("activity recall")
             return ResolvedAction(
                 action=registry.ACTIVITY_RECALL,
                 recall_window=proposal.recall_window,
             )
 
         if proposal.action == registry.PROJECT_LIST:
+            if arguments or proposal.reference:
+                raise CompletionTargetNotFoundError("projects")
             return ResolvedAction(action=registry.PROJECT_LIST)
 
         if proposal.action == registry.TASK_LIST:
+            if arguments:
+                raise CompletionTargetNotFoundError("tasks")
+            if not proposal.reference:
+                return ResolvedAction(action=registry.TASK_LIST)
             project = self._resolve_project_reference(
                 proposal.reference, world
             )
@@ -416,6 +782,140 @@ class ConversationService:
                 action=registry.TASK_LIST,
                 project_id=project.project_id,
             )
+
+        if proposal.action == registry.REMINDER_CREATE:
+            if proposal.reference or set(arguments) != {"title", "when"}:
+                raise CompletionTargetNotFoundError("that reminder")
+            title = arguments.get("title")
+            when = arguments.get("when")
+            if not title or not when:
+                raise CompletionTargetNotFoundError("that reminder")
+            return ResolvedAction(
+                action=registry.REMINDER_CREATE,
+                reminder_title=title,
+                reminder_when=when,
+            )
+
+        if proposal.action == registry.REMINDER_LIST:
+            if arguments or proposal.reference:
+                raise CompletionTargetNotFoundError("reminders")
+            return ResolvedAction(action=registry.REMINDER_LIST)
+
+        if proposal.action in {
+            registry.REMINDER_COMPLETE,
+            registry.REMINDER_CANCEL,
+        }:
+            if arguments:
+                raise CompletionTargetNotFoundError(
+                    proposal.reference or "that reminder"
+                )
+            reminder = self._resolve_reminder_reference(
+                proposal.reference, world
+            )
+            return ResolvedAction(
+                action=proposal.action,
+                reminder_id=reminder.reminder_id,
+                reminder_title=reminder.title,
+            )
+
+        if proposal.action == registry.NOTIFICATION_LIST:
+            if proposal.reference or set(arguments) - {"status"}:
+                raise CompletionTargetNotFoundError("notifications")
+            status = arguments.get("status")
+            if status not in {None, "unread"}:
+                raise CompletionTargetNotFoundError("notifications")
+            return ResolvedAction(
+                action=registry.NOTIFICATION_LIST,
+                notification_status="unread" if status == "unread" else None,
+            )
+
+        if proposal.action in {
+            registry.NOTIFICATION_READ,
+            registry.NOTIFICATION_DISMISS,
+        }:
+            if arguments:
+                raise CompletionTargetNotFoundError(
+                    proposal.reference or "that notification"
+                )
+            notification = self._resolve_notification_reference(
+                proposal.reference, world
+            )
+            return ResolvedAction(
+                action=proposal.action,
+                notification_id=notification.notification_id,
+            )
+
+        if proposal.action == registry.NOTE_CREATE:
+            if proposal.reference or set(arguments) - {"title", "content"}:
+                raise CompletionTargetNotFoundError("that note")
+            title = arguments.get("title")
+            if not title:
+                raise CompletionTargetNotFoundError("that note")
+            return ResolvedAction(
+                action=registry.NOTE_CREATE,
+                note_title=title,
+                note_content=arguments.get("content", ""),
+            )
+
+        if proposal.action == registry.NOTE_LIST:
+            if proposal.reference or set(arguments) - {"status"}:
+                raise CompletionTargetNotFoundError("notes")
+            status = arguments.get("status")
+            if status not in {None, "active", "archived"}:
+                raise CompletionTargetNotFoundError("notes")
+            return ResolvedAction(
+                action=registry.NOTE_LIST,
+                note_status="archived" if status == "archived" else "active",
+            )
+
+        if proposal.action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
+            note = self._resolve_note_reference(proposal.reference, world)
+            allowed_arguments = (
+                {"title", "content"}
+                if proposal.action == registry.NOTE_UPDATE
+                else set()
+            )
+            if set(arguments) - allowed_arguments:
+                raise CompletionTargetNotFoundError(note.title)
+            if proposal.action == registry.NOTE_UPDATE and not (
+                arguments.get("content") or arguments.get("title")
+            ):
+                raise CompletionTargetNotFoundError(note.title)
+            return ResolvedAction(
+                action=proposal.action,
+                note_id=note.note_id,
+                note_title=arguments.get("title"),
+                note_content=arguments.get("content"),
+            )
+
+        if proposal.action == registry.LIST_CREATE:
+            if proposal.reference or set(arguments) != {"title"} or not arguments.get("title"):
+                raise CompletionTargetNotFoundError("that list")
+            return ResolvedAction(action=proposal.action, list_title=arguments["title"])
+        if proposal.action == registry.LIST_LIST:
+            if arguments or proposal.reference:
+                raise CompletionTargetNotFoundError("lists")
+            return ResolvedAction(action=proposal.action)
+        if proposal.action in {registry.LIST_ADD_ITEM, registry.LIST_ARCHIVE}:
+            value = self._resolve_list_reference(proposal.reference, world)
+            if proposal.action == registry.LIST_ADD_ITEM:
+                if set(arguments) != {"content"} or not arguments.get("content"):
+                    raise CompletionTargetNotFoundError(value.title)
+                content = arguments["content"]
+            else:
+                if arguments:
+                    raise CompletionTargetNotFoundError(value.title)
+                content = None
+            return ResolvedAction(action=proposal.action, list_id=value.list_id,
+                                  list_title=value.title, list_item_content=content)
+        if proposal.action == registry.LIST_COMPLETE_ITEM:
+            if set(arguments) != {"item"} or not arguments.get("item"):
+                raise CompletionTargetNotFoundError("that list item")
+            value = self._resolve_list_reference(proposal.reference, world)
+            item = self._resolve_list_item_reference(arguments["item"], value)
+            return ResolvedAction(action=proposal.action, list_id=value.list_id,
+                                  list_title=value.title, list_item_id=item.item_id,
+                                  list_item_content=item.content)
 
         raise UnknownActionError(proposal.action)
 
@@ -468,6 +968,84 @@ class ConversationService:
             raise AmbiguousReferenceError([p.name for p in matches])
         raise CompletionTargetNotFoundError(target or "that project")
 
+    def _resolve_reminder_reference(
+        self, reference: str | None, world: WorldView
+    ) -> ReminderRef:
+        target = (reference or "").strip().lower()
+        matches = [
+            reminder
+            for reminder in world.reminders
+            if reminder.status in {"scheduled", "due"}
+            and target
+            and (
+                target in reminder.title.lower()
+                or reminder.title.lower() in target
+            )
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([item.title for item in matches])
+        raise CompletionTargetNotFoundError(target or "that reminder")
+
+    def _resolve_notification_reference(
+        self, reference: str | None, world: WorldView
+    ) -> NotificationRef:
+        target = (reference or "").strip().lower()
+        candidates = [
+            item for item in world.notifications if item.status != "dismissed"
+        ]
+        matches = [
+            item
+            for item in candidates
+            if target
+            and (target in item.title.lower() or item.title.lower() in target)
+        ]
+        if not target and len(candidates) == 1:
+            return candidates[0]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1 or (not target and len(candidates) > 1):
+            raise AmbiguousReferenceError([item.title for item in candidates])
+        raise CompletionTargetNotFoundError(target or "that notification")
+
+    def _resolve_note_reference(
+        self, reference: str | None, world: WorldView
+    ) -> NoteRef:
+        target = (reference or "").strip().lower()
+        matches = [
+            note
+            for note in world.notes
+            if note.status == "active"
+            and target
+            and (target in note.title.lower() or note.title.lower() in target)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([note.title for note in matches])
+        raise CompletionTargetNotFoundError(target or "that note")
+
+    def _resolve_list_reference(self, reference: str | None, world: WorldView) -> ListRef:
+        target = (reference or "").strip().lower()
+        matches = [value for value in world.lists if value.status == "active" and target
+                   and (target in value.title.lower() or value.title.lower() in target)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([value.title for value in matches])
+        raise CompletionTargetNotFoundError(target or "that list")
+
+    def _resolve_list_item_reference(self, reference: str, value: ListRef) -> ListItemRef:
+        target = reference.strip().lower()
+        matches = [item for item in value.items if item.status == "active"
+                   and (target in item.content.lower() or item.content.lower() in target)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([item.content for item in matches])
+        raise CompletionTargetNotFoundError(target or "that list item")
+
     def _context_payload(self, current_user: User) -> dict | None:
         if self._context_store is None:
             return None
@@ -504,7 +1082,7 @@ class ConversationService:
         """Most-recent-first, within the recall window, capped. Coerces naive
         timestamps to UTC so the SQLite harness (which may return naive
         datetimes) compares cleanly against an aware cutoff."""
-        cutoff = datetime.now(timezone.utc) - self._RECALL_WINDOW
+        cutoff = ensure_utc(self._clock.now()) - self._RECALL_WINDOW
 
         def _aware(dt: datetime) -> datetime:
             if dt.tzinfo is None:
@@ -537,7 +1115,7 @@ class ConversationService:
         except ZoneInfoNotFoundError:
             user_tz = timezone.utc
 
-        now_local = datetime.now(timezone.utc).astimezone(user_tz)
+        now_local = ensure_utc(self._clock.now()).astimezone(user_tz)
         yesterday = now_local.date() - timedelta(days=1)
         start_local = datetime.combine(
             yesterday, datetime.min.time(), tzinfo=user_tz
@@ -572,6 +1150,18 @@ class ConversationService:
             for a in activities
         )
 
+    async def _latest_completed_task_title(
+        self, current_user: User, world: WorldView
+    ) -> str | None:
+        activities = await self._activity.list_activities(current_user)
+        for activity in activities:
+            if (
+                activity.event_type == "task.completed"
+                and activity.entity_type == "task"
+            ):
+                return self._entity_label(activity, world)
+        return None
+
     def _entity_label(
         self, activity: Activity, world: WorldView
     ) -> str | None:
@@ -580,7 +1170,7 @@ class ConversationService:
         entity is no longer resolvable, returns None so the responder can use
         a neutral phrase without leaking storage identifiers."""
         payload = activity.payload or {}
-        for key in ("title", "task_title", "name"):
+        for key in ("title", "task_title", "name", "content", "list_title"):
             value = payload.get(key)
             if isinstance(value, str) and value:
                 return value
@@ -592,4 +1182,17 @@ class ConversationService:
             for project in world.projects:
                 if project.project_id == activity.entity_id:
                     return project.name
+        if activity.entity_type == "note":
+            for note in world.notes:
+                if note.note_id == activity.entity_id:
+                    return note.title
+        if activity.entity_type == "list":
+            for value in world.lists:
+                if value.list_id == activity.entity_id:
+                    return value.title
+        if activity.entity_type == "list_item":
+            for value in world.lists:
+                for item in value.items:
+                    if item.item_id == activity.entity_id:
+                        return item.content
         return None

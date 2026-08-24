@@ -35,6 +35,10 @@ from app.tasks.router import router as tasks_router
 from app.activity.router import router as activity_router
 from app.conversation.router import router as conversation_router
 from app.speech.router import router as speech_router
+from app.reminders.router import router as reminders_router
+from app.notifications.router import router as notifications_router
+from app.notes.router import router as notes_router
+from app.lists.router import router as lists_router
 from app.db.session import get_engine, get_sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,10 @@ app.include_router(tasks_router)
 app.include_router(activity_router)
 app.include_router(conversation_router)
 app.include_router(speech_router)
+app.include_router(reminders_router)
+app.include_router(notifications_router)
+app.include_router(notes_router)
+app.include_router(lists_router)
 
 
 @app.get("/")

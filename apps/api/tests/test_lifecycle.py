@@ -33,8 +33,22 @@ async def test_health_is_liveness_only(client: httpx.AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_ready_reports_ready_when_db_reachable(
     client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """/ready returns 200 when the database answers SELECT 1."""
+    from app import main
+
+    class ReachableSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def execute(self, statement) -> None:
+            return None
+
+    monkeypatch.setattr(main, "get_sessionmaker", lambda: ReachableSession)
     resp = await client.get("/ready")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ready"}

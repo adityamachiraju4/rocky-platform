@@ -21,7 +21,10 @@ LlmResponder. The template says what happened; it does not interpret.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol
+
+from app.core.time import UTC, utc_to_local
 
 # Outcome kinds. Each maps to one rendering branch in the responder.
 OutcomeKind = Literal[
@@ -30,6 +33,19 @@ OutcomeKind = Literal[
     "task_status",
     "task_updated",
     "activity_recall",
+    "reminder_created",
+    "reminder_list",
+    "reminder_updated",
+    "notification_list",
+    "notification_updated",
+    "note_created",
+    "note_list",
+    "note_updated",
+    "list_created",
+    "list_list",
+    "list_item_added",
+    "list_item_completed",
+    "list_archived",
     "conversation",
     "no_match",
     "target_not_found",
@@ -67,6 +83,9 @@ class Outcome:
     # task_list
     task_total: int = 0
     task_active: int = 0
+    task_scope: Literal["project", "all"] = "project"
+    task_titles: tuple[str, ...] = ()
+    latest_completed_task_title: str | None = None
     # task_status
     project_name: str | None = None
     # task_updated
@@ -75,9 +94,28 @@ class Outcome:
     # activity_recall
     recall_facts: tuple[RecallFact, ...] = ()
     recall_window: Literal["recent", "yesterday"] = "recent"
+    # reminders
+    reminder_title: str | None = None
+    reminder_due_at: datetime | None = None
+    reminder_timezone: str | None = None
+    reminder_status: str | None = None
+    reminders: tuple[tuple[str, datetime, str, str], ...] = ()
+    # notifications
+    notifications: tuple[tuple[str, str, str], ...] = ()
+    notification_title: str | None = None
+    notification_status: str | None = None
+    # notes
+    notes: tuple[tuple[str, str], ...] = ()
+    note_title: str | None = None
+    note_status: str | None = None
+    # lists
+    list_title: str | None = None
+    list_titles: tuple[str, ...] = ()
+    list_item_content: str | None = None
     # no_match / ambiguous
     candidates: tuple[str, ...] = ()
     target: str | None = None
+    target_type: Literal["task", "reminder", "notification", "note", "list"] = "task"
     reply: str | None = None
 
 
@@ -105,11 +143,27 @@ def _recall_phrase(fact: RecallFact) -> str:
         return f"completed {label}" if label else "completed a task"
     if fact.event_type == "task.updated":
         return f"updated the task {label}" if label else "updated a task"
+    if fact.event_type == "note.created":
+        return f"created the note {label}" if label else "created a note"
+    if fact.event_type == "note.updated":
+        return f"updated the note {label}" if label else "updated a note"
+    if fact.event_type == "note.archived":
+        return f"archived the note {label}" if label else "archived a note"
+    if fact.event_type == "list.created":
+        return f"created the list {label}" if label else "created a list"
+    if fact.event_type == "list.archived":
+        return f"archived the list {label}" if label else "archived a list"
+    if fact.event_type == "list.item_added":
+        return f"added {label} to a list" if label else "added a list item"
+    if fact.event_type == "list.item_completed":
+        return f"completed {label} on a list" if label else "completed a list item"
 
     if fact.entity_type == "project":
         return f"updated the {label} project" if label else "updated a project"
     if fact.entity_type == "task":
         return f"updated the task {label}" if label else "updated a task"
+    if fact.entity_type == "note":
+        return f"updated the note {label}" if label else "updated a note"
     return "recorded activity"
 
 
@@ -127,8 +181,19 @@ class TemplateResponder:
             return f"You have {n} project(s): {names}."
 
         if outcome.kind == "task_list":
-            if outcome.task_total == 0:
+            if outcome.task_scope == "project" and outcome.task_total == 0:
                 return "That project has no tasks."
+            if outcome.task_titles:
+                titles = ", ".join(_quoted(t) for t in outcome.task_titles)
+                n = len(outcome.task_titles)
+                return f"You have {n} active task(s): {titles}."
+            if outcome.latest_completed_task_title:
+                return (
+                    "You don't have any active tasks right now. Your latest "
+                    f"completed task was {_quoted(outcome.latest_completed_task_title)}."
+                )
+            if outcome.task_scope == "all" or outcome.task_active == 0:
+                return "You don't have any active tasks right now."
             return (
                 f"That project has {outcome.task_total} task(s), "
                 f"{outcome.task_active} active."
@@ -160,6 +225,71 @@ class TemplateResponder:
             )
             return prefix + ": " + ", ".join(parts) + "."
 
+        if outcome.kind == "reminder_created":
+            assert outcome.reminder_due_at is not None
+            assert outcome.reminder_timezone is not None
+            due = _friendly_due(
+                outcome.reminder_due_at, outcome.reminder_timezone
+            )
+            return f"I'll remind you to {outcome.reminder_title} {due}."
+
+        if outcome.kind == "reminder_list":
+            if not outcome.reminders:
+                return "You don't have any open reminders."
+            rendered = [
+                f"{_quoted(title)} {_friendly_due(due_at, timezone_name)}"
+                for title, due_at, timezone_name, _status in outcome.reminders
+            ]
+            return "Your open reminders are: " + "; ".join(rendered) + "."
+
+        if outcome.kind == "reminder_updated":
+            verb = "completed" if outcome.reminder_status == "completed" else "cancelled"
+            return f"Done -- I {verb} the reminder {_quoted(outcome.reminder_title)}."
+
+        if outcome.kind == "notification_list":
+            if not outcome.notifications:
+                return "You don't have any active notifications."
+            rendered = [
+                f"{_quoted(title)}: {body}"
+                for title, body, _status in outcome.notifications
+            ]
+            return "Your notifications are: " + "; ".join(rendered) + "."
+
+        if outcome.kind == "notification_updated":
+            verb = "marked as read" if outcome.notification_status == "read" else "dismissed"
+            return f"I {verb} {_quoted(outcome.notification_title)}."
+
+        if outcome.kind == "note_created":
+            return f"I created the note {_quoted(outcome.note_title)}."
+
+        if outcome.kind == "note_list":
+            if not outcome.notes:
+                return f"You don't have any {outcome.note_status} notes."
+            titles = ", ".join(
+                _quoted(title) for title, _content in outcome.notes
+            )
+            return f"Your {outcome.note_status} notes are: {titles}."
+
+        if outcome.kind == "note_updated":
+            if outcome.note_status == "archived":
+                return f"I archived the note {_quoted(outcome.note_title)}."
+            return f"I updated the note {_quoted(outcome.note_title)}."
+
+        if outcome.kind == "list_created":
+            return f"I created the {_quoted(outcome.list_title)} list."
+        if outcome.kind == "list_list":
+            if not outcome.list_titles:
+                return "You don't have any active lists."
+            return "Your active lists are: " + ", ".join(
+                _quoted(title) for title in outcome.list_titles
+            ) + "."
+        if outcome.kind == "list_item_added":
+            return f"I added {_quoted(outcome.list_item_content)} to the {_quoted(outcome.list_title)} list."
+        if outcome.kind == "list_item_completed":
+            return f"I marked {_quoted(outcome.list_item_content)} complete on the {_quoted(outcome.list_title)} list."
+        if outcome.kind == "list_archived":
+            return f"I archived the {_quoted(outcome.list_title)} list."
+
         if outcome.kind == "conversation":
             return outcome.reply or "Yes. I'm here."
 
@@ -167,6 +297,23 @@ class TemplateResponder:
             return "I'm not sure what you want me to do."
 
         if outcome.kind == "target_not_found":
+            if outcome.target_type == "list":
+                return f"I couldn't find that active list or list item: {_quoted(outcome.target)}."
+            if outcome.target_type == "note":
+                return (
+                    "I couldn't find an active note called "
+                    f"{_quoted(outcome.target)}."
+                )
+            if outcome.target_type == "notification":
+                return (
+                    "I couldn't find an active notification called "
+                    f"{_quoted(outcome.target)}."
+                )
+            if outcome.target_type == "reminder":
+                return (
+                    "I understood which reminder action you want, but I "
+                    f"couldn't find an open reminder called {_quoted(outcome.target)}."
+                )
             if outcome.target:
                 return (
                     "I understood that you want to finish a task, but I "
@@ -189,3 +336,10 @@ class TemplateResponder:
 
         # Every OutcomeKind above is handled; reaching here is a bug.
         raise ValueError(f"unrenderable outcome kind: {outcome.kind}")
+
+
+def _friendly_due(value: datetime, timezone_name: str) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    local = utc_to_local(value, timezone_name)
+    return local.strftime("on %b %-d at %-I:%M %p")

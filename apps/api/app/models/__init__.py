@@ -9,6 +9,11 @@ from app.models.activity import Activity
 from app.models.device import Device
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
+from app.models.reminder import Reminder
+from app.models.notification import Notification
+from app.models.note import Note
+from app.models.list import List, ListItem
+from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
 from app.models.task import Task
 from app.models.user import User
@@ -18,6 +23,12 @@ __all__ = [
     "Device",
     "Session",
     "RefreshToken",
+    "Reminder",
+    "Notification",
+    "Note",
+    "List",
+    "ListItem",
+    "ScheduledJob",
     "Project",
     "Task",
     "Activity",

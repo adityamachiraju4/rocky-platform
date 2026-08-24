@@ -26,6 +26,7 @@ class IdentityService:
         user = User(
             email=data.email,
             full_name=data.full_name,
+            timezone=data.timezone,
             password_hash=hash_password(data.password),
         )
         await self._users.add(user)

@@ -27,6 +27,20 @@ class ResolvedAction(BaseModel):
     task_id: uuid.UUID | None = None
     status: str | None = None
     recall_window: str | None = None
+    reminder_id: uuid.UUID | None = None
+    reminder_title: str | None = None
+    reminder_when: str | None = None
+    notification_id: uuid.UUID | None = None
+    notification_status: str | None = None
+    note_id: uuid.UUID | None = None
+    note_title: str | None = None
+    note_content: str | None = None
+    note_status: str | None = None
+    list_id: uuid.UUID | None = None
+    list_title: str | None = None
+    list_item_id: uuid.UUID | None = None
+    list_item_content: str | None = None
+    list_status: str | None = None
 
 
 class ConversationRequest(BaseModel):

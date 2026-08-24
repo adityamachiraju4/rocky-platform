@@ -29,7 +29,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -40,6 +40,10 @@ from app.core.dependencies import get_session
 from app.db.base import Base
 from app.main import app as fastapi_app
 from app.models.activity import Activity
+from app.models.reminder import Reminder
+from app.models.scheduled_job import ScheduledJob
+from app.notifications.schemas import NotificationCreate
+from app.notifications.service import NotificationsService
 from app.models.user import User
 
 import app.models  # noqa: F401  (populate Base.metadata before create_all)
@@ -208,6 +212,27 @@ async def _get_task(
     return resp.json()
 
 
+async def _make_notification(
+    sessionmaker: async_sessionmaker,
+    user_id: str,
+    title: str,
+    body: str | None = None,
+) -> str:
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        item = await NotificationsService(session).create_notification(
+            user,
+            NotificationCreate(
+                type="reminder",
+                title=title,
+                body=body or title,
+                source_type="reminder",
+                source_id=uuid.uuid4(),
+            ),
+        )
+        return str(item.id)
+
+
 async def _set_activity_created_at(
     sessionmaker: async_sessionmaker,
     activity_id: str,
@@ -259,6 +284,557 @@ def _local_datetime_for_day_offset(
     return datetime.combine(target_date, at_time, tzinfo=user_tz).astimezone(
         timezone.utc
     )
+
+
+# --------------------------------------------------------------------------
+# Reminders: deterministic language through authoritative scheduling.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_reminder_via_conversation_persists_job_and_activity(
+    ctx,
+) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    async with sessionmaker() as session:
+        await session.execute(
+            update(User)
+            .where(User.id == uuid.UUID(user_id))
+            .values(timezone="Asia/Kolkata")
+        )
+        await session.commit()
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Remind me tomorrow at 6 PM to call Ramesh"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is True
+    assert body["action"] == "reminder.create"
+    assert "call Ramesh" in body["reply"]
+    assert "6:00 PM" in body["reply"]
+
+    expected = _local_datetime_for_day_offset(
+        "Asia/Kolkata", 1, time(18, 0)
+    )
+    async with sessionmaker() as session:
+        reminder = (
+            await session.execute(
+                select(Reminder).where(Reminder.user_id == uuid.UUID(user_id))
+            )
+        ).scalar_one()
+        job = await session.get(ScheduledJob, reminder.scheduled_job_id)
+        assert reminder.title == "call Ramesh"
+        assert reminder.timezone == "Asia/Kolkata"
+        assert reminder.due_at.replace(tzinfo=timezone.utc) == expected
+        assert job is not None and job.job_type == "reminder.due"
+        activity = (
+            await session.execute(
+                select(Activity).where(
+                    Activity.entity_id == reminder.id,
+                    Activity.event_type == "reminder.created",
+                )
+            )
+        ).scalar_one()
+        assert activity.payload["title"] == "call Ramesh"
+
+
+@pytest.mark.asyncio
+async def test_list_complete_and_cancel_reminders_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    for title in ("call Ramesh", "submit expenses"):
+        created = await client.post(
+            "/conversation",
+            json={"message": f"Remind me tomorrow at 6 PM to {title}"},
+            headers=headers,
+        )
+        assert created.json()["executed"] is True
+
+    listed = await client.post(
+        "/conversation",
+        json={"message": "What reminders do I have?"},
+        headers=headers,
+    )
+    assert listed.json()["action"] == "reminder.list"
+    assert "call Ramesh" in listed.json()["reply"]
+    assert "submit expenses" in listed.json()["reply"]
+
+    completed = await client.post(
+        "/conversation",
+        json={"message": "Complete my call Ramesh reminder"},
+        headers=headers,
+    )
+    cancelled = await client.post(
+        "/conversation",
+        json={"message": "Cancel my submit expenses reminder"},
+        headers=headers,
+    )
+    assert completed.json()["action"] == "reminder.complete"
+    assert cancelled.json()["action"] == "reminder.cancel"
+
+    reminders = await client.get("/reminders", headers=headers)
+    statuses = {item["title"]: item["status"] for item in reminders.json()}
+    assert statuses == {
+        "call Ramesh": "completed",
+        "submit expenses": "cancelled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_reminder_completion_wins_over_same_named_task(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers)
+    task = await _make_task(client, headers, project_id, title="call Ramesh")
+    await client.post(
+        "/conversation",
+        json={"message": "Remind me tomorrow at 6 PM to call Ramesh"},
+        headers=headers,
+    )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Complete my call Ramesh reminder"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == "reminder.complete"
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_reminder_reference_fails_closed(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    for title in ("call Ramesh", "call Ramesh about launch"):
+        await client.post(
+            "/conversation",
+            json={"message": f"Remind me tomorrow at 6 PM to {title}"},
+            headers=headers,
+        )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Cancel my call Ramesh reminder"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is False
+    reminders = await client.get("/reminders", headers=headers)
+    assert {item["status"] for item in reminders.json()} == {"scheduled"}
+
+
+@pytest.mark.asyncio
+async def test_provider_reminder_proposal_stays_inside_registry(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="reminder.create",
+            arguments={"title": "call Ramesh", "when": "tomorrow at 6 PM"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Please make sure I call Ramesh tomorrow evening"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is True
+    assert response.json()["action"] == "reminder.create"
+    reminders = await client.get("/reminders", headers=headers)
+    assert [item["title"] for item in reminders.json()] == ["call Ramesh"]
+
+
+# --------------------------------------------------------------------------
+# Notifications: closed, ownership-scoped acknowledgement actions.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_and_read_notification_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    notification_id = await _make_notification(
+        sessionmaker, user_id, "Call Ramesh", "It is time to call Ramesh."
+    )
+
+    listed = await client.post(
+        "/conversation",
+        json={"message": "Show unread notifications"},
+        headers=headers,
+    )
+    assert listed.json()["action"] == "notification.list"
+    assert "Call Ramesh" in listed.json()["reply"]
+
+    read = await client.post(
+        "/conversation",
+        json={"message": "Mark that notification as read"},
+        headers=headers,
+    )
+    assert read.json()["executed"] is True
+    assert read.json()["action"] == "notification.read"
+    fetched = await client.get(
+        f"/notifications/{notification_id}", headers=headers
+    )
+    assert fetched.json()["status"] == "read"
+    assert fetched.json()["read_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_dismiss_notification_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    notification_id = await _make_notification(
+        sessionmaker, user_id, "Submit expenses"
+    )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Dismiss that notification"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == "notification.dismiss"
+    fetched = await client.get(
+        f"/notifications/{notification_id}", headers=headers
+    )
+    assert fetched.json()["status"] == "dismissed"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_notification_reference_fails_closed(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    await _make_notification(sessionmaker, user_id, "First")
+    await _make_notification(sessionmaker, user_id, "Second")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Dismiss that notification"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is False
+    listed = await client.get("/notifications", headers=headers)
+    assert {item["status"] for item in listed.json()} == {"unread"}
+
+
+@pytest.mark.asyncio
+async def test_conversation_cannot_access_another_users_notification(ctx) -> None:
+    client, sessionmaker = ctx
+    mine, _ = await _auth_headers(client, sessionmaker)
+    _, other_id = await _auth_headers(client, sessionmaker)
+    await _make_notification(sessionmaker, other_id, "Private alert")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Dismiss the private alert notification"},
+        headers=mine,
+    )
+
+    assert response.json()["executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_notification_action_resolves_owned_title(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="notification.dismiss",
+            reference="Call Ramesh",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    notification_id = await _make_notification(
+        sessionmaker, user_id, "Call Ramesh"
+    )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Clear the alert about Ramesh"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == "notification.dismiss"
+    fetched = await client.get(
+        f"/notifications/{notification_id}", headers=headers
+    )
+    assert fetched.json()["status"] == "dismissed"
+
+
+# --------------------------------------------------------------------------
+# Notes: durable user artifacts through closed grounded actions.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_and_list_notes_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    created = await client.post(
+        "/conversation",
+        json={"message": "Make a note that the investor call moved to Friday"},
+        headers=headers,
+    )
+    assert created.json()["executed"] is True
+    assert created.json()["action"] == "note.create"
+
+    named = await client.post(
+        "/conversation",
+        json={"message": "Create a note called launch ideas"},
+        headers=headers,
+    )
+    assert named.json()["action"] == "note.create"
+
+    listed = await client.post(
+        "/conversation",
+        json={"message": "Show my notes"},
+        headers=headers,
+    )
+    assert listed.json()["action"] == "note.list"
+    assert "launch ideas" in listed.json()["reply"]
+    notes = await client.get("/notes", headers=headers)
+    by_title = {item["title"]: item["content"] for item in notes.json()}
+    assert by_title["the investor call moved to Friday"] == (
+        "the investor call moved to Friday"
+    )
+    assert by_title["launch ideas"] == ""
+
+
+@pytest.mark.asyncio
+async def test_update_and_archive_note_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/notes",
+        json={"title": "Launch ideas", "content": "Initial"},
+        headers=headers,
+    )
+
+    updated = await client.post(
+        "/conversation",
+        json={"message": "Update the launch ideas note with Invite Ramesh"},
+        headers=headers,
+    )
+    assert updated.json()["action"] == "note.update"
+    fetched = await client.get(f"/notes/{created.json()['id']}", headers=headers)
+    assert fetched.json()["content"] == "Invite Ramesh"
+
+    archived = await client.post(
+        "/conversation",
+        json={"message": "Archive the launch ideas note"},
+        headers=headers,
+    )
+    assert archived.json()["action"] == "note.archive"
+    fetched = await client.get(f"/notes/{created.json()['id']}", headers=headers)
+    assert fetched.json()["status"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_note_title_fails_closed(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    for title in ("Launch ideas", "Launch ideas for Europe"):
+        await client.post("/notes", json={"title": title}, headers=headers)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Archive the launch ideas note"},
+        headers=headers,
+    )
+    assert response.json()["executed"] is False
+    listed = await client.get("/notes", headers=headers)
+    assert {item["status"] for item in listed.json()} == {"active"}
+
+
+@pytest.mark.asyncio
+async def test_conversation_note_resolution_is_owner_scoped(ctx) -> None:
+    client, sessionmaker = ctx
+    mine, _ = await _auth_headers(client, sessionmaker)
+    theirs, _ = await _auth_headers(client, sessionmaker)
+    await client.post("/notes", json={"title": "Private plan"}, headers=theirs)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Archive the private plan note"},
+        headers=mine,
+    )
+    assert response.json()["executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_note_update_validates_reference_and_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="note.update",
+            reference="Launch ideas",
+            arguments={"content": "Invite design partners"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/notes", json={"title": "Launch ideas"}, headers=headers
+    )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Add the design partners to my launch thought"},
+        headers=headers,
+    )
+    assert response.json()["action"] == "note.update"
+    fetched = await client.get(f"/notes/{created.json()['id']}", headers=headers)
+    assert fetched.json()["content"] == "Invite design partners"
+
+
+@pytest.mark.asyncio
+async def test_provider_note_action_rejects_unregistered_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="note.update",
+            reference="Launch ideas",
+            arguments={"user_id": str(uuid.uuid4()), "content": "stolen"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/notes",
+        json={"title": "Launch ideas", "content": "original"},
+        headers=headers,
+    )
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Change my launch note"},
+        headers=headers,
+    )
+    assert response.json()["executed"] is False
+    fetched = await client.get(f"/notes/{created.json()['id']}", headers=headers)
+    assert fetched.json()["content"] == "original"
+
+
+# --------------------------------------------------------------------------
+# Lists: lightweight collections remain distinct from Tasks.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_conversation_happy_path(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/conversation", json={"message": "Create a grocery list"}, headers=headers
+    )
+    assert created.json()["action"] == "list.create"
+    listed = await client.post(
+        "/conversation", json={"message": "Show my lists"}, headers=headers
+    )
+    assert listed.json()["action"] == "list.list"
+    added = await client.post(
+        "/conversation", json={"message": "Add milk to the grocery list"}, headers=headers
+    )
+    assert added.json()["action"] == "list.add_item"
+    completed = await client.post(
+        "/conversation",
+        json={"message": "Mark milk complete on the grocery list"},
+        headers=headers,
+    )
+    assert completed.json()["action"] == "list.complete_item"
+    values = await client.get("/lists", headers=headers)
+    list_id = values.json()[0]["id"]
+    items = await client.get(f"/lists/{list_id}/items", headers=headers)
+    assert items.json()[0]["status"] == "complete"
+    archived = await client.post(
+        "/conversation", json={"message": "Archive the grocery list"}, headers=headers
+    )
+    assert archived.json()["action"] == "list.archive"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_list_and_item_resolution_fail_closed(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    for title in ("Trip", "Trip packing"):
+        await client.post("/lists", json={"title": title}, headers=headers)
+    ambiguous_list = await client.post(
+        "/conversation", json={"message": "Add passport to the trip list"}, headers=headers
+    )
+    assert ambiguous_list.json()["executed"] is False
+
+    grocery = await client.post("/lists", json={"title": "Grocery"}, headers=headers)
+    list_id = grocery.json()["id"]
+    for content in ("milk", "milk chocolate"):
+        await client.post(f"/lists/{list_id}/items", json={"content": content}, headers=headers)
+    ambiguous_item = await client.post(
+        "/conversation",
+        json={"message": "Mark milk complete on the grocery list"},
+        headers=headers,
+    )
+    assert ambiguous_item.json()["executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_conversation_is_owner_scoped(ctx) -> None:
+    client, sessionmaker = ctx
+    mine, _ = await _auth_headers(client, sessionmaker)
+    theirs, _ = await _auth_headers(client, sessionmaker)
+    await client.post("/lists", json={"title": "Private"}, headers=theirs)
+    response = await client.post(
+        "/conversation", json={"message": "Archive the private list"}, headers=mine
+    )
+    assert response.json()["executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_list_action_validates_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action", action="list.add_item", reference="Grocery",
+            arguments={"content": "milk"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    parent = await client.post("/lists", json={"title": "Grocery"}, headers=headers)
+    response = await client.post(
+        "/conversation", json={"message": "Put milk on groceries"}, headers=headers
+    )
+    assert response.json()["action"] == "list.add_item"
+    items = await client.get(f"/lists/{parent.json()['id']}/items", headers=headers)
+    assert [item["content"] for item in items.json()] == ["milk"]
+
+
+@pytest.mark.asyncio
+async def test_provider_list_action_rejects_extra_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action", action="list.add_item", reference="Grocery",
+            arguments={"content": "milk", "position": "0"},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    parent = await client.post("/lists", json={"title": "Grocery"}, headers=headers)
+    response = await client.post(
+        "/conversation", json={"message": "Put milk on groceries"}, headers=headers
+    )
+    assert response.json()["executed"] is False
+    items = await client.get(f"/lists/{parent.json()['id']}/items", headers=headers)
+    assert items.json() == []
 
 
 # --------------------------------------------------------------------------
@@ -478,6 +1054,31 @@ async def test_provider_unknown_action_is_rejected(ctx) -> None:
     body = resp.json()
     assert body["executed"] is False
     assert body["reply"] == "I can't do that yet."
+    fetched = await _get_task(client, headers, project_id, task["id"])
+    assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_provider_registered_action_rejects_extra_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.update",
+            reference="Homepage",
+            arguments={"status": "complete", "user_id": str(uuid.uuid4())},
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Strict")
+    task = await _make_task(client, headers, project_id, title="Homepage")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "The homepage can be wrapped up"},
+        headers=headers,
+    )
+    assert response.json()["executed"] is False
     fetched = await _get_task(client, headers, project_id, task["id"])
     assert fetched["status"] == "active"
 
@@ -727,6 +1328,62 @@ async def test_task_list_via_conversation(ctx) -> None:
     body = resp.json()
     assert body["executed"] is True
     assert body["action"] == "task.list"
+
+
+@pytest.mark.asyncio
+async def test_lined_up_question_reports_no_active_tasks_before_history(
+    ctx,
+) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Today")
+    await _make_task(
+        client, headers, project_id, title="Create the homepage"
+    )
+
+    complete = await client.post(
+        "/conversation",
+        json={"message": "finish the homepage task"},
+        headers=headers,
+    )
+    assert complete.status_code == 200, complete.text
+    assert complete.json()["executed"] is True
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "Do we have anything specific lined up for today?"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.list"
+    assert "don't have any active tasks" in body["reply"]
+    assert "Create the homepage" in body["reply"]
+    assert "Recently:" not in body["reply"]
+
+
+@pytest.mark.asyncio
+async def test_lined_up_question_reports_active_task_names(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Today")
+    await _make_task(client, headers, project_id, title="Prepare roadmap")
+    await _make_task(client, headers, project_id, title="Review launch notes")
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "What should I work on?"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.list"
+    assert "Prepare roadmap" in body["reply"]
+    assert "Review launch notes" in body["reply"]
 
 
 # --------------------------------------------------------------------------

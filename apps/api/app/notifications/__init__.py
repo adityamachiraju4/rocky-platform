@@ -1,0 +1,1 @@
+"""Native Notifications capability."""

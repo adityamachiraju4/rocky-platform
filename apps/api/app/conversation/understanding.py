@@ -168,6 +168,22 @@ def safe_world_payload(world: WorldView) -> dict[str, Any]:
             "task.list",
             "task.update",
             "activity.recall",
+            "reminder.create",
+            "reminder.list",
+            "reminder.complete",
+            "reminder.cancel",
+            "notification.list",
+            "notification.read",
+            "notification.dismiss",
+            "note.create",
+            "note.list",
+            "note.update",
+            "note.archive",
+            "list.create",
+            "list.list",
+            "list.add_item",
+            "list.complete_item",
+            "list.archive",
         ],
         "projects": [
             {"name": p.name}
@@ -180,5 +196,33 @@ def safe_world_payload(world: WorldView) -> dict[str, Any]:
                 "status": t.status,
             }
             for t in world.tasks[:50]
+        ],
+        "reminders": [
+            {
+                "title": reminder.title,
+                "status": reminder.status,
+                "due_at": reminder.due_at.isoformat(),
+                "timezone": reminder.timezone,
+            }
+            for reminder in world.reminders[:50]
+        ],
+        "notifications": [
+            {"title": item.title, "body": item.body, "status": item.status}
+            for item in world.notifications[:50]
+        ],
+        "notes": [
+            {"title": note.title, "status": note.status}
+            for note in world.notes[:50]
+        ],
+        "lists": [
+            {
+                "title": value.title,
+                "status": value.status,
+                "items": [
+                    {"content": item.content, "status": item.status}
+                    for item in value.items[:50]
+                ],
+            }
+            for value in world.lists[:25]
         ],
     }

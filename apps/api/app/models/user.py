@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from app.models.device import Device
     from app.models.project import Project
     from app.models.session import Session
+    from app.models.scheduled_job import ScheduledJob
+    from app.models.reminder import Reminder
+    from app.models.notification import Notification
+    from app.models.note import Note
+    from app.models.list import List
 
 
 class User(Base):
@@ -39,6 +44,9 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
+    )
+    timezone: Mapped[str] = mapped_column(
+        String(64), default="UTC", server_default="UTC", nullable=False
     )
     password_hash: Mapped[str] = mapped_column(
         String(255),
@@ -93,6 +101,29 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    scheduled_jobs: Mapped[list["ScheduledJob"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    reminders: Mapped[list["Reminder"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    notifications: Mapped[list["Notification"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    notes: Mapped[list["Note"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    lists: Mapped[list["List"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
