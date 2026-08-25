@@ -246,7 +246,9 @@ function RockyInteraction({
     const input = inputRef.current;
     if (!input) return;
     input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 132)}px`;
+    const contentHeight = input.scrollHeight;
+    input.style.height = `${Math.min(contentHeight, 132)}px`;
+    input.style.overflowY = contentHeight > 132 ? "auto" : "hidden";
   }, []);
 
   const cleanupVoiceDetection = useCallback(() => {
@@ -322,6 +324,7 @@ function RockyInteraction({
   }, []);
 
   useEffect(() => {
+    lifecycleActiveRef.current = true;
     const stopVoiceForLifecycle = () => {
       lifecycleActiveRef.current = false;
       const recognition = recognitionRef.current;

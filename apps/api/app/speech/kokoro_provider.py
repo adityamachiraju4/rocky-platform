@@ -11,6 +11,7 @@ import logging
 import re
 import threading
 import time
+import warnings
 
 from app.speech.provider import SpeechAudio, SpeechProviderError
 
@@ -94,10 +95,25 @@ class KokoroSpeechProvider:
                     started = time.perf_counter()
                     from kokoro import KPipeline
 
-                    self._pipeline = KPipeline(
-                        lang_code=_voice_lang_code(self._voice),
-                        repo_id=KOKORO_REPO_ID,
-                    )
+                    with warnings.catch_warnings():
+                        # Kokoro 0.9.4 constructs its pinned model with these
+                        # deprecated/no-op PyTorch options during startup.
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="dropout option adds dropout.*",
+                            category=UserWarning,
+                            module=r"torch\.nn\.modules\.rnn",
+                        )
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=r"`torch\.nn\.utils\.weight_norm` is deprecated.*",
+                            category=FutureWarning,
+                            module=r"torch\.nn\.utils\.weight_norm",
+                        )
+                        self._pipeline = KPipeline(
+                            lang_code=_voice_lang_code(self._voice),
+                            repo_id=KOKORO_REPO_ID,
+                        )
                     logger.info(
                         "Kokoro pipeline loaded: elapsed_ms=%.1f",
                         (time.perf_counter() - started) * 1000,
