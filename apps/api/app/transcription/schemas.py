@@ -1,0 +1,8 @@
+"""Wire schemas for Rocky transcription."""
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class TranscriptionResponse(BaseModel):
+    text: str = Field(min_length=1)

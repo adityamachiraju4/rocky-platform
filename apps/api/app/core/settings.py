@@ -17,10 +17,20 @@ Environment variables
 * ``OPENAI_TTS_MODEL`` — optional OpenAI speech model for spoken replies.
 * ``OPENAI_TTS_VOICE`` — optional Rocky identity voice.
 * ``OPENAI_TTS_SPEED`` — optional speech speed.
+* ``TRANSCRIPTION_PROVIDER`` — transcription provider name.
+* ``LOCAL_WHISPER_MODEL`` — local Whisper model size/name.
+* ``LOCAL_WHISPER_DEVICE`` — local Whisper execution device.
+* ``LOCAL_WHISPER_COMPUTE_TYPE`` — local Whisper compute type.
+* ``LOCAL_WHISPER_LANGUAGE`` — local Whisper transcription language.
+* ``LOCAL_WHISPER_WARMUP`` — warm local Whisper after API startup.
+* ``OPENAI_TRANSCRIPTION_API_KEY`` — optional official OpenAI key for STT.
+* ``OPENAI_TRANSCRIPTION_BASE_URL`` — optional transcription API base URL.
+* ``OPENAI_TRANSCRIPTION_MODEL`` — optional OpenAI transcription model.
 * ``LOCAL_TTS_ENABLED`` — enable/disable local neural speech.
 * ``LOCAL_TTS_PROVIDER`` — local speech provider name.
 * ``LOCAL_TTS_VOICE`` — local Rocky audition/default voice.
 * ``LOCAL_TTS_SPEED`` — local speech speed.
+* ``LOCAL_TTS_WARMUP`` — warm local speech after API startup.
 """
 from __future__ import annotations
 
@@ -56,10 +66,19 @@ _DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 _DEFAULT_OPENAI_TTS_VOICE = "cedar"
 _DEFAULT_OPENAI_TTS_SPEED = 0.95
+_DEFAULT_TRANSCRIPTION_PROVIDER = "local"
+_DEFAULT_LOCAL_WHISPER_MODEL = "small"
+_DEFAULT_LOCAL_WHISPER_DEVICE = "auto"
+_DEFAULT_LOCAL_WHISPER_COMPUTE_TYPE = "auto"
+_DEFAULT_LOCAL_WHISPER_LANGUAGE = "en"
+_DEFAULT_LOCAL_WHISPER_WARMUP = True
+_DEFAULT_OPENAI_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1"
+_DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _DEFAULT_LOCAL_TTS_ENABLED = True
 _DEFAULT_LOCAL_TTS_PROVIDER = "kokoro"
 _DEFAULT_LOCAL_TTS_VOICE = "am_adam"
 _DEFAULT_LOCAL_TTS_SPEED = 0.95
+_DEFAULT_LOCAL_TTS_WARMUP = True
 _MISSING = object()
 
 
@@ -159,6 +178,75 @@ def get_openai_tts_speed() -> float:
         ) from exc
 
 
+def get_transcription_provider_name() -> str:
+    return (
+        os.getenv("TRANSCRIPTION_PROVIDER")
+        or _DEFAULT_TRANSCRIPTION_PROVIDER
+    ).strip().lower()
+
+
+def get_local_whisper_model() -> str:
+    return os.getenv("LOCAL_WHISPER_MODEL") or _DEFAULT_LOCAL_WHISPER_MODEL
+
+
+def get_local_whisper_device() -> str:
+    return os.getenv("LOCAL_WHISPER_DEVICE") or _DEFAULT_LOCAL_WHISPER_DEVICE
+
+
+def get_local_whisper_compute_type() -> str:
+    return (
+        os.getenv("LOCAL_WHISPER_COMPUTE_TYPE")
+        or _DEFAULT_LOCAL_WHISPER_COMPUTE_TYPE
+    )
+
+
+def get_local_whisper_language() -> str:
+    return os.getenv("LOCAL_WHISPER_LANGUAGE") or _DEFAULT_LOCAL_WHISPER_LANGUAGE
+
+
+def get_local_whisper_warmup() -> bool:
+    return _env_bool("LOCAL_WHISPER_WARMUP", _DEFAULT_LOCAL_WHISPER_WARMUP)
+
+
+def get_openai_transcription_api_key() -> str | None:
+    raw = os.getenv("OPENAI_TRANSCRIPTION_API_KEY")
+    if raw:
+        return raw
+    general = get_openai_api_key()
+    general_base_url = os.getenv("OPENAI_BASE_URL")
+    if general and (
+        not general_base_url or _is_official_openai_url(general_base_url)
+    ):
+        return general
+    tts_key = os.getenv("OPENAI_TTS_API_KEY")
+    if (
+        tts_key
+        and _is_official_openai_url(get_openai_tts_base_url())
+        and _is_official_openai_url(get_openai_transcription_base_url())
+    ):
+        return tts_key
+    return None
+
+
+def get_openai_transcription_base_url() -> str:
+    return (
+        os.getenv("OPENAI_TRANSCRIPTION_BASE_URL")
+        or _DEFAULT_OPENAI_TRANSCRIPTION_BASE_URL
+    )
+
+
+def get_openai_transcription_model() -> str:
+    return (
+        os.getenv("OPENAI_TRANSCRIPTION_MODEL")
+        or _DEFAULT_OPENAI_TRANSCRIPTION_MODEL
+    )
+
+
+def _is_official_openai_url(value: str) -> bool:
+    normalized = value.strip().rstrip("/")
+    return normalized == "https://api.openai.com/v1"
+
+
 def get_local_tts_enabled() -> bool:
     raw = os.getenv("LOCAL_TTS_ENABLED")
     if raw is None or raw == "":
@@ -186,6 +274,17 @@ def get_local_tts_speed() -> float:
         ) from exc
 
 
+def get_local_tts_warmup() -> bool:
+    return _env_bool("LOCAL_TTS_WARMUP", _DEFAULT_LOCAL_TTS_WARMUP)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Convenience module-level constants, evaluated at import time. Functions
 # above remain the source of truth for callers that need late binding.
 SESSION_TTL: timedelta = get_session_ttl()
@@ -207,8 +306,18 @@ __all__ = [
     "get_openai_tts_model",
     "get_openai_tts_voice",
     "get_openai_tts_speed",
+    "get_transcription_provider_name",
+    "get_local_whisper_model",
+    "get_local_whisper_device",
+    "get_local_whisper_compute_type",
+    "get_local_whisper_language",
+    "get_local_whisper_warmup",
+    "get_openai_transcription_api_key",
+    "get_openai_transcription_base_url",
+    "get_openai_transcription_model",
     "get_local_tts_enabled",
     "get_local_tts_provider",
     "get_local_tts_voice",
     "get_local_tts_speed",
+    "get_local_tts_warmup",
 ]

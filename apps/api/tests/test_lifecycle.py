@@ -10,6 +10,12 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def disable_voice_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOCAL_WHISPER_WARMUP", "false")
+    monkeypatch.setenv("LOCAL_TTS_WARMUP", "false")
+
+
 @pytest_asyncio.fixture
 async def client() -> httpx.AsyncClient:
     """In-process client that drives the app's real lifespan."""

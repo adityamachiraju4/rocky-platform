@@ -63,7 +63,7 @@ export default function ProjectDetailPage() {
   return (
     <AppShell>
       <header className="page-head">
-        <Link to="/" className="back">← Projects</Link>
+        <Link to="/projects" className="back">← Projects</Link>
         {project.data && (
           <EditableTitle value={project.data.name} onSave={renameProject} />
         )}

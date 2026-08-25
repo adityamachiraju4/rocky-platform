@@ -17,9 +17,11 @@ aiosqlite==0.22.1         # in-memory SQLite driver (test data layer)
 pydantic==2.13.4
 email-validator==2.3.0    # required by pydantic EmailStr
 python-dotenv==1.2.2
+python-multipart==0.0.21
 openai==2.48.0
 kokoro==0.9.4
 soundfile==0.14.0
+faster-whisper==1.2.1
 
 # Auth / security
 pwdlib==0.3.0             # Argon2id password hashing

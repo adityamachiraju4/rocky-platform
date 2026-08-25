@@ -10,6 +10,7 @@ from io import BytesIO
 import logging
 import re
 import threading
+import time
 
 from app.speech.provider import SpeechAudio, SpeechProviderError
 
@@ -50,8 +51,19 @@ class KokoroSpeechProvider:
             )
         return SpeechAudio(content=content, media_type="audio/wav")
 
+    async def warm_up(self) -> None:
+        """Load the local pipeline without delaying API readiness."""
+        started = time.perf_counter()
+        await asyncio.to_thread(self._ensure_pipeline)
+        logger.info(
+            "Kokoro warm-up complete: elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+            extra={"speech_provider": "kokoro"},
+        )
+
     def _synthesize_sync(self, text: str) -> bytes:
         pipeline = self._ensure_pipeline()
+        started = time.perf_counter()
         generator = pipeline(
             text,
             voice=self._voice,
@@ -68,17 +80,28 @@ class KokoroSpeechProvider:
         joined = np.concatenate(segments)
         output = BytesIO()
         sf.write(output, joined, KOKORO_SAMPLE_RATE, format="WAV")
+        logger.info(
+            "Kokoro synthesis complete: elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+            extra={"speech_provider": "kokoro"},
+        )
         return output.getvalue()
 
     def _ensure_pipeline(self):
         if self._pipeline is None:
             with self._lock:
                 if self._pipeline is None:
+                    started = time.perf_counter()
                     from kokoro import KPipeline
 
                     self._pipeline = KPipeline(
                         lang_code=_voice_lang_code(self._voice),
                         repo_id=KOKORO_REPO_ID,
+                    )
+                    logger.info(
+                        "Kokoro pipeline loaded: elapsed_ms=%.1f",
+                        (time.perf_counter() - started) * 1000,
+                        extra={"speech_provider": "kokoro"},
                     )
         return self._pipeline
 

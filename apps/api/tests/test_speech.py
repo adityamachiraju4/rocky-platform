@@ -65,11 +65,13 @@ def test_local_tts_defaults_are_locked(
     monkeypatch.delenv("LOCAL_TTS_PROVIDER", raising=False)
     monkeypatch.delenv("LOCAL_TTS_VOICE", raising=False)
     monkeypatch.delenv("LOCAL_TTS_SPEED", raising=False)
+    monkeypatch.delenv("LOCAL_TTS_WARMUP", raising=False)
 
     assert settings.get_local_tts_enabled() is True
     assert settings.get_local_tts_provider() == "kokoro"
     assert settings.get_local_tts_voice() == "am_adam"
     assert settings.get_local_tts_speed() == 0.95
+    assert settings.get_local_tts_warmup() is True
 
 
 @pytest.fixture(autouse=True)

@@ -7,6 +7,12 @@ import ProjectsPage from "./pages/ProjectsPage";
 import MissionControlPage from "./pages/MissionControlPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
 import ActivityPage from "./pages/ActivityPage";
+import TasksPage from "./pages/TasksPage";
+import RemindersPage from "./pages/RemindersPage";
+import NotificationsPage from "./pages/NotificationsPage";
+import NotesPage from "./pages/NotesPage";
+import ListsPage from "./pages/ListsPage";
+import SettingsPage from "./pages/SettingsPage";
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth();
@@ -48,10 +54,58 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/tasks"
+        element={
+          <RequireAuth>
+            <TasksPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/reminders"
+        element={
+          <RequireAuth>
+            <RemindersPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/notifications"
+        element={
+          <RequireAuth>
+            <NotificationsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/notes"
+        element={
+          <RequireAuth>
+            <NotesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/lists"
+        element={
+          <RequireAuth>
+            <ListsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/activity"
         element={
           <RequireAuth>
             <ActivityPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <RequireAuth>
+            <SettingsPage />
           </RequireAuth>
         }
       />

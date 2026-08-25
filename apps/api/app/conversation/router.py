@@ -9,6 +9,9 @@ ambiguity) are NOT errors: they come back as 200 with executed=False.
 """
 from __future__ import annotations
 
+import logging
+import time
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.auth.dependencies import CurrentUserDep
@@ -18,6 +21,7 @@ from app.conversation.exceptions import UnknownActionError
 from app.conversation.schemas import ConversationRequest, ConversationResponse
 
 router = APIRouter(prefix="/conversation", tags=["conversation"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=ConversationResponse)
@@ -26,6 +30,7 @@ async def converse(
     current_user: CurrentUserDep,
     service: ConversationServiceDep,
 ) -> ConversationResponse:
+    started = time.perf_counter()
     try:
         return await service.handle(
             current_user,
@@ -39,3 +44,8 @@ async def converse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Resolver proposed an unknown action.",
         ) from exc
+    finally:
+        logger.info(
+            "Conversation request complete: elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )

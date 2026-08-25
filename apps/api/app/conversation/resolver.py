@@ -87,6 +87,7 @@ ACTIVE_TASK_CUES: tuple[str, ...] = (
     "anything to do today",
     "what do i have to do",
     "what do i need to do",
+    "what tasks do i have",
 )
 ACTIVITY_RECALL_CUES: tuple[str, ...] = (
     "what did i do",

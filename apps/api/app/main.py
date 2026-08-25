@@ -19,15 +19,17 @@ Capability routers are mounted elsewhere and are unaffected by this module.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.middleware_registry import configure_middleware
+from app.core import settings
 from app.auth.router import router as auth_router
 from app.identity.router import router as identity_router
 from app.projects.router import router as projects_router
@@ -35,13 +37,49 @@ from app.tasks.router import router as tasks_router
 from app.activity.router import router as activity_router
 from app.conversation.router import router as conversation_router
 from app.speech.router import router as speech_router
+from app.transcription.router import router as transcription_router
+from app.transcription.dependencies import (
+    warm_local_whisper_transcription_provider,
+)
+from app.speech.dependencies import warm_local_speech_provider
 from app.reminders.router import router as reminders_router
 from app.notifications.router import router as notifications_router
 from app.notes.router import router as notes_router
 from app.lists.router import router as lists_router
 from app.db.session import get_engine, get_sessionmaker
 
+app_logger = logging.getLogger("app")
+app_logger.setLevel(logging.INFO)
+if not app_logger.handlers:
+    app_handler = logging.StreamHandler()
+    app_handler.setFormatter(
+        logging.Formatter("%(levelname)s %(name)s %(message)s")
+    )
+    app_logger.addHandler(app_handler)
+app_logger.propagate = False
 logger = logging.getLogger(__name__)
+
+
+async def _warm_voice_models() -> None:
+    if (
+        settings.get_transcription_provider_name() == "local"
+        and settings.get_local_whisper_warmup()
+    ):
+        try:
+            await warm_local_whisper_transcription_provider()
+        except Exception as exc:  # noqa: BLE001 - warm-up is best effort
+            logger.warning(
+                "Local Whisper warm-up failed: error_type=%s",
+                exc.__class__.__name__,
+            )
+    if settings.get_local_tts_enabled() and settings.get_local_tts_warmup():
+        try:
+            await warm_local_speech_provider()
+        except Exception as exc:  # noqa: BLE001 - warm-up is best effort
+            logger.warning(
+                "Local speech warm-up failed: error_type=%s",
+                exc.__class__.__name__,
+            )
 
 
 @asynccontextmanager
@@ -55,9 +93,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     logger.info("Rocky API starting up")
     get_engine()  # construct the process-wide engine singleton
+    voice_warmup_task = asyncio.create_task(_warm_voice_models())
     try:
         yield
     finally:
+        if not voice_warmup_task.done():
+            voice_warmup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await voice_warmup_task
         logger.info("Rocky API shutting down")
         await get_engine().dispose()
 
@@ -80,6 +123,7 @@ app.include_router(tasks_router)
 app.include_router(activity_router)
 app.include_router(conversation_router)
 app.include_router(speech_router)
+app.include_router(transcription_router)
 app.include_router(reminders_router)
 app.include_router(notifications_router)
 app.include_router(notes_router)

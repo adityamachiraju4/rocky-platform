@@ -45,6 +45,12 @@ def get_local_speech_provider() -> SpeechProvider | None:
     return _kokoro_provider
 
 
+async def warm_local_speech_provider() -> None:
+    provider = get_local_speech_provider()
+    if isinstance(provider, KokoroSpeechProvider):
+        await provider.warm_up()
+
+
 def get_openai_speech_provider() -> SpeechProvider | None:
     api_key = settings.get_openai_tts_api_key()
     if not api_key:
@@ -94,6 +100,7 @@ SpeechServiceDep = Annotated[SpeechService, Depends(get_speech_service)]
 
 __all__ = [
     "get_local_speech_provider",
+    "warm_local_speech_provider",
     "get_openai_speech_provider",
     "get_speech_provider",
     "get_speech_service",

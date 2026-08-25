@@ -1,11 +1,20 @@
-// Composed read for Mission Control. Frontend-only: fans out listTasks per
-// project (finding #8 — bounded N+1, no backend aggregate endpoint in v1).
-//
-// Exposed as a single stable module-level fetcher so useResource's
-// [state.nonce, fetcher] effect does not loop on re-render.
-
-import { listActivity, listProjects, listTasks } from "./api";
-import type { Activity, Project, Task } from "./types";
+import {
+  getAuthenticatedProfile,
+  listActivity,
+  listNotifications,
+  listProjects,
+  listReminders,
+  listTasks,
+} from "./api";
+import { AuthExpiredError } from "./api";
+import type {
+  Activity,
+  Notification,
+  Project,
+  Reminder,
+  Task,
+  UserProfile,
+} from "./types";
 
 export interface ProjectSummary {
   project: Project;
@@ -25,48 +34,60 @@ export interface EntityRef {
   projectId: string;
   projectName: string;
 }
+
+type Panel = "work" | "activity" | "reminders" | "notifications" | "profile";
+
 export interface MissionControlData {
   projects: ProjectSummary[];
   activeTasks: ActiveTaskRef[];
   recentActivity: Activity[];
-  latestActivity: Activity | null;
+  reminders: Reminder[];
+  notifications: Notification[];
+  profile: UserProfile | null;
   entityById: Map<string, EntityRef>;
+  errors: Partial<Record<Panel, string>>;
 }
 
-const RECENT_ACTIVITY_LIMIT = 8;
-
-function isActive(task: Task): boolean {
-  return task.status === "active";
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "This section is unavailable.";
 }
 
 export async function loadMissionControl(): Promise<MissionControlData> {
-  const projects = await listProjects();
+  const results = await Promise.allSettled([
+    listProjects(),
+    listActivity(),
+    listReminders(),
+    listNotifications(),
+    getAuthenticatedProfile(),
+  ] as const);
+  const [projectsResult, activityResult, remindersResult, notificationsResult, profileResult] = results;
 
-  // One listTasks call per project, in parallel. Bounded by project count.
-  const taskLists = await Promise.all(
-    projects.map((p) => listTasks(p.id)),
+  const authFailure = results.find(
+    (result) => result.status === "rejected" && result.reason instanceof AuthExpiredError,
   );
+  if (authFailure?.status === "rejected") throw authFailure.reason;
 
-  const projectSummaries: ProjectSummary[] = projects.map((project, i) => ({
+  const errors: MissionControlData["errors"] = {};
+  const projects = projectsResult.status === "fulfilled" ? projectsResult.value : [];
+  if (projectsResult.status === "rejected") errors.work = errorMessage(projectsResult.reason);
+
+  const taskResults = await Promise.allSettled(projects.map((project) => listTasks(project.id)));
+  const taskAuthFailure = taskResults.find(
+    (result) => result.status === "rejected" && result.reason instanceof AuthExpiredError,
+  );
+  if (taskAuthFailure?.status === "rejected") throw taskAuthFailure.reason;
+  const taskLists = taskResults.map((result) => result.status === "fulfilled" ? result.value : []);
+  if (taskResults.some((result) => result.status === "rejected")) {
+    errors.work = "Some project tasks could not be loaded.";
+  }
+
+  const projectSummaries = projects.map((project, index) => ({
     project,
-    activeTaskCount: taskLists[i].filter(isActive).length,
+    activeTaskCount: taskLists[index].filter((task) => task.status === "active").length,
   }));
-
   const activeTasks: ActiveTaskRef[] = [];
-  projects.forEach((project, i) => {
-    for (const task of taskLists[i]) {
-      if (isActive(task)) {
-        activeTasks.push({
-          task,
-          projectId: project.id,
-          projectName: project.name,
-        });
-      }
-    }
-  });
-
   const entityById = new Map<string, EntityRef>();
-  projects.forEach((project, i) => {
+  projects.forEach((project, index) => {
     entityById.set(project.id, {
       kind: "project",
       id: project.id,
@@ -74,7 +95,7 @@ export async function loadMissionControl(): Promise<MissionControlData> {
       projectId: project.id,
       projectName: project.name,
     });
-    for (const task of taskLists[i]) {
+    taskLists[index].forEach((task) => {
       entityById.set(task.id, {
         kind: "task",
         id: task.id,
@@ -82,17 +103,25 @@ export async function loadMissionControl(): Promise<MissionControlData> {
         projectId: project.id,
         projectName: project.name,
       });
-    }
+      if (task.status === "active") {
+        activeTasks.push({ task, projectId: project.id, projectName: project.name });
+      }
+    });
   });
-  const activity = await listActivity();
-  const recentActivity = activity.slice(0, RECENT_ACTIVITY_LIMIT);
-  const latestActivity = activity.length > 0 ? activity[0] : null;
+
+  if (activityResult.status === "rejected") errors.activity = errorMessage(activityResult.reason);
+  if (remindersResult.status === "rejected") errors.reminders = errorMessage(remindersResult.reason);
+  if (notificationsResult.status === "rejected") errors.notifications = errorMessage(notificationsResult.reason);
+  if (profileResult.status === "rejected") errors.profile = errorMessage(profileResult.reason);
 
   return {
     projects: projectSummaries,
     activeTasks,
-    recentActivity,
-    latestActivity,
+    recentActivity: activityResult.status === "fulfilled" ? activityResult.value.slice(0, 7) : [],
+    reminders: remindersResult.status === "fulfilled" ? remindersResult.value : [],
+    notifications: notificationsResult.status === "fulfilled" ? notificationsResult.value : [],
+    profile: profileResult.status === "fulfilled" ? profileResult.value : null,
     entityById,
+    errors,
   };
 }

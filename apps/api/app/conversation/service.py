@@ -21,6 +21,7 @@ Honest non-execution: a no-match or ambiguous reference returns
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -232,7 +233,12 @@ class ConversationService:
         message: str,
         timezone_name: str | None = None,
     ) -> ConversationResponse:
+        world_started = time.perf_counter()
         world = await self._build_world(current_user)
+        logger.info(
+            "Conversation world build complete: elapsed_ms=%.1f",
+            (time.perf_counter() - world_started) * 1000,
+        )
 
         # Resolver proposes; it executes nothing. Deterministic handling stays
         # first so obvious/offline cases never depend on a model provider.
@@ -309,6 +315,7 @@ class ConversationService:
             else None
         )
         try:
+            provider_started = time.perf_counter()
             result = await self._understanding_provider.understand(
                 message=message,
                 world=world,
@@ -316,10 +323,15 @@ class ConversationService:
             )
         except UnderstandingProviderError as exc:
             logger.warning(
-                "Conversation understanding provider failed",
+                "Conversation understanding provider failed: elapsed_ms=%.1f",
+                (time.perf_counter() - provider_started) * 1000,
                 extra={"provider_error_code": exc.code},
             )
             return fallback
+        logger.info(
+            "Conversation understanding provider complete: elapsed_ms=%.1f",
+            (time.perf_counter() - provider_started) * 1000,
+        )
 
         outcome = await self._outcome_from_understanding(
             current_user, result, world, timezone_name

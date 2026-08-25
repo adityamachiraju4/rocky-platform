@@ -36,7 +36,6 @@ export default function ActivityPage() {
             <li key={a.id} className="ledger-row">
               <span className="ledger-time mono">{formatTime(a.created_at)}</span>
               <span className="ledger-label">{humanizeEvent(a.event_type)}</span>
-              <span className="ledger-type mono">{a.event_type}</span>
               {summary && <span className="ledger-summary mono">{summary}</span>}
             </li>
           );

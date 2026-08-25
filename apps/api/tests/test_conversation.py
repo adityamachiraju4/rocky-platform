@@ -1475,6 +1475,23 @@ async def test_task_list_via_conversation(ctx) -> None:
 
 
 @pytest.mark.asyncio
+async def test_natural_task_status_question_uses_task_list(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/conversation",
+        json={"message": "What tasks do I have today?"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.list"
+
+
+@pytest.mark.asyncio
 async def test_lined_up_question_reports_no_active_tasks_before_history(
     ctx,
 ) -> None:

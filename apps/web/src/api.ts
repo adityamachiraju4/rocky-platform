@@ -27,6 +27,21 @@ import type {
   TaskUpdate,
   TokenResponse,
   SpeechRequest,
+  TranscriptionResponse,
+  Reminder,
+  ReminderCreate,
+  Notification,
+  NotificationUpdate,
+  Note,
+  NoteCreate,
+  NoteUpdate,
+  RockyList,
+  RockyListCreate,
+  RockyListUpdate,
+  RockyListItem,
+  RockyListItemCreate,
+  RockyListItemUpdate,
+  UserProfile,
 } from "./types";
 
 const BASE = "/api";
@@ -115,10 +130,11 @@ export interface BinaryResponse {
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, auth = true } = opts;
+  const isFormDataBody = typeof FormData !== "undefined" && body instanceof FormData;
 
   const doFetch = async (): Promise<Response> => {
     const headers: Record<string, string> = {};
-    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (body !== undefined && !isFormDataBody) headers["Content-Type"] = "application/json";
     if (auth) {
       const token = getAccessToken();
       if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -126,7 +142,11 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     return fetch(`${BASE}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined
+        ? undefined
+        : isFormDataBody
+          ? body
+          : JSON.stringify(body),
     });
   };
 
@@ -274,3 +294,108 @@ export const synthesizeSpeech = (
   signal?: AbortSignal,
 ): Promise<BinaryResponse> =>
   requestBlob("/speech", { method: "POST", body, signal });
+
+export const transcribeAudio = (
+  audio: Blob,
+  filename = "rocky-voice.webm",
+): Promise<TranscriptionResponse> => {
+  const body = new FormData();
+  body.append("audio", audio, filename);
+  return request<TranscriptionResponse>("/transcribe", { method: "POST", body });
+};
+
+// ---- Reminders ----------------------------------------------------------
+
+export const listReminders = (status?: Reminder["status"]): Promise<Reminder[]> =>
+  request<Reminder[]>(status ? `/reminders?status=${encodeURIComponent(status)}` : "/reminders");
+
+export const createReminder = (body: ReminderCreate): Promise<Reminder> =>
+  request<Reminder>("/reminders", { method: "POST", body });
+
+export const completeReminder = (id: string): Promise<Reminder> =>
+  request<Reminder>(`/reminders/${id}/complete`, { method: "POST" });
+
+export const cancelReminder = (id: string): Promise<Reminder> =>
+  request<Reminder>(`/reminders/${id}`, { method: "DELETE" });
+
+// ---- Notifications ------------------------------------------------------
+
+export const listNotifications = (status?: Notification["status"]): Promise<Notification[]> =>
+  request<Notification[]>(status ? `/notifications?status=${encodeURIComponent(status)}` : "/notifications");
+
+export const updateNotification = (
+  id: string,
+  body: NotificationUpdate,
+): Promise<Notification> =>
+  request<Notification>(`/notifications/${id}`, { method: "PATCH", body });
+
+// ---- Notes --------------------------------------------------------------
+
+export const listNotes = (status: Note["status"] = "active"): Promise<Note[]> =>
+  request<Note[]>(`/notes?status=${encodeURIComponent(status)}`);
+
+export const getNote = (id: string): Promise<Note> =>
+  request<Note>(`/notes/${id}`);
+
+export const createNote = (body: NoteCreate): Promise<Note> =>
+  request<Note>("/notes", { method: "POST", body });
+
+export const updateNote = (id: string, body: NoteUpdate): Promise<Note> =>
+  request<Note>(`/notes/${id}`, { method: "PATCH", body });
+
+// ---- Lists --------------------------------------------------------------
+
+export const listLists = (status: RockyList["status"] = "active"): Promise<RockyList[]> =>
+  request<RockyList[]>(`/lists?status=${encodeURIComponent(status)}`);
+
+export const getList = (id: string): Promise<RockyList> =>
+  request<RockyList>(`/lists/${id}`);
+
+export const createList = (body: RockyListCreate): Promise<RockyList> =>
+  request<RockyList>("/lists", { method: "POST", body });
+
+export const updateList = (id: string, body: RockyListUpdate): Promise<RockyList> =>
+  request<RockyList>(`/lists/${id}`, { method: "PATCH", body });
+
+export const listListItems = (
+  listId: string,
+  status?: RockyListItem["status"],
+): Promise<RockyListItem[]> =>
+  request<RockyListItem[]>(
+    status
+      ? `/lists/${listId}/items?status=${encodeURIComponent(status)}`
+      : `/lists/${listId}/items`,
+  );
+
+export const createListItem = (
+  listId: string,
+  body: RockyListItemCreate,
+): Promise<RockyListItem> =>
+  request<RockyListItem>(`/lists/${listId}/items`, { method: "POST", body });
+
+export const updateListItem = (
+  listId: string,
+  itemId: string,
+  body: RockyListItemUpdate,
+): Promise<RockyListItem> =>
+  request<RockyListItem>(`/lists/${listId}/items/${itemId}`, { method: "PATCH", body });
+
+function authenticatedUserId(): string | null {
+  const token = getAccessToken();
+  if (!token) return null;
+  try {
+    const encoded = token.split(".")[1];
+    if (!encoded) return null;
+    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const normalized = base64.padEnd(base64.length + ((4 - base64.length % 4) % 4), "=");
+    const payload = JSON.parse(atob(normalized)) as { sub?: unknown };
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAuthenticatedProfile(): Promise<UserProfile | null> {
+  const userId = authenticatedUserId();
+  return userId ? request<UserProfile>(`/identity/users/${userId}`) : null;
+}

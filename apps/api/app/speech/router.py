@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import Response
@@ -22,6 +23,7 @@ async def synthesize_speech(
     current_user: CurrentUserDep,
     service: SpeechServiceDep,
 ) -> Response:
+    started = time.perf_counter()
     try:
         audio = await service.synthesize(payload.text)
     except SpeechUnavailableError as exc:
@@ -30,5 +32,10 @@ async def synthesize_speech(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Speech is unavailable.",
         ) from exc
+    finally:
+        logger.info(
+            "Speech request complete: elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )
 
     return Response(content=audio.content, media_type=audio.media_type)
