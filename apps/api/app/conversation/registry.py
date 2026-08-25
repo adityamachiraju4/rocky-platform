@@ -6,8 +6,8 @@ name of that action must appear here or ConversationService refuses it. The
 model cannot invent ``task.delete``, ``run_shell``, or ``send_email`` because
 those names have no entry in this dict and therefore no executor.
 
-v1 executable subset — three actions, enough to prove one mutation and two
-reads through the orchestrator:
+v1 executable subset: every conversationally-controlled backend capability
+that has an explicitly reviewed action contract.
 
     project.list  — read: the user's projects
     task.list     — read: tasks in one project
@@ -22,7 +22,9 @@ from __future__ import annotations
 from typing import Final
 
 PROJECT_LIST: Final = "project.list"
+PROJECT_CREATE: Final = "project.create"
 TASK_LIST: Final = "task.list"
+TASK_CREATE: Final = "task.create"
 TASK_UPDATE: Final = "task.update"
 ACTIVITY_RECALL: Final = "activity.recall"
 REMINDER_CREATE: Final = "reminder.create"
@@ -44,30 +46,31 @@ LIST_ARCHIVE: Final = "list.archive"
 
 # The closed set. Membership is checked before any dispatch. Anything not in
 # here is an UnknownActionError, regardless of who proposed it.
-ALLOWED_ACTIONS: Final[frozenset[str]] = frozenset(
-    {
-        PROJECT_LIST,
-        TASK_LIST,
-        TASK_UPDATE,
-        ACTIVITY_RECALL,
-        REMINDER_CREATE,
-        REMINDER_LIST,
-        REMINDER_COMPLETE,
-        REMINDER_CANCEL,
-        NOTIFICATION_LIST,
-        NOTIFICATION_READ,
-        NOTIFICATION_DISMISS,
-        NOTE_CREATE,
-        NOTE_LIST,
-        NOTE_UPDATE,
-        NOTE_ARCHIVE,
-        LIST_CREATE,
-        LIST_LIST,
-        LIST_ADD_ITEM,
-        LIST_COMPLETE_ITEM,
-        LIST_ARCHIVE,
-    }
+ACTION_NAMES: Final[tuple[str, ...]] = (
+    PROJECT_LIST,
+    PROJECT_CREATE,
+    TASK_LIST,
+    TASK_CREATE,
+    TASK_UPDATE,
+    ACTIVITY_RECALL,
+    REMINDER_CREATE,
+    REMINDER_LIST,
+    REMINDER_COMPLETE,
+    REMINDER_CANCEL,
+    NOTIFICATION_LIST,
+    NOTIFICATION_READ,
+    NOTIFICATION_DISMISS,
+    NOTE_CREATE,
+    NOTE_LIST,
+    NOTE_UPDATE,
+    NOTE_ARCHIVE,
+    LIST_CREATE,
+    LIST_LIST,
+    LIST_ADD_ITEM,
+    LIST_COMPLETE_ITEM,
+    LIST_ARCHIVE,
 )
+ALLOWED_ACTIONS: Final[frozenset[str]] = frozenset(ACTION_NAMES)
 
 
 def is_allowed(action: str) -> bool:

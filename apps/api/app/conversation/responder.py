@@ -29,8 +29,10 @@ from app.core.time import UTC, utc_to_local
 # Outcome kinds. Each maps to one rendering branch in the responder.
 OutcomeKind = Literal[
     "project_list",
+    "project_created",
     "task_list",
     "task_status",
+    "task_created",
     "task_updated",
     "activity_recall",
     "reminder_created",
@@ -80,6 +82,7 @@ class Outcome:
     action: str | None = None
     # project_list
     project_names: tuple[str, ...] = ()
+    project_name: str | None = None
     # task_list
     task_total: int = 0
     task_active: int = 0
@@ -87,7 +90,6 @@ class Outcome:
     task_titles: tuple[str, ...] = ()
     latest_completed_task_title: str | None = None
     # task_status
-    project_name: str | None = None
     # task_updated
     task_title: str | None = None
     task_status: str | None = None
@@ -115,7 +117,9 @@ class Outcome:
     # no_match / ambiguous
     candidates: tuple[str, ...] = ()
     target: str | None = None
-    target_type: Literal["task", "reminder", "notification", "note", "list"] = "task"
+    target_type: Literal[
+        "project", "task", "reminder", "notification", "note", "list"
+    ] = "task"
     reply: str | None = None
 
 
@@ -180,6 +184,9 @@ class TemplateResponder:
             n = len(outcome.project_names)
             return f"You have {n} project(s): {names}."
 
+        if outcome.kind == "project_created":
+            return f"Created the {_quoted(outcome.project_name)} project."
+
         if outcome.kind == "task_list":
             if outcome.task_scope == "project" and outcome.task_total == 0:
                 return "That project has no tasks."
@@ -205,6 +212,14 @@ class TemplateResponder:
             if outcome.task_status == "active":
                 return f"'{outcome.task_title}' is still active."
             return f"'{outcome.task_title}' is {outcome.task_status}."
+
+        if outcome.kind == "task_created":
+            if outcome.project_name:
+                return (
+                    f"Created {_quoted(outcome.task_title)} "
+                    f"in {outcome.project_name}."
+                )
+            return f"Created {_quoted(outcome.task_title)}."
 
         if outcome.kind == "task_updated":
             return (
@@ -297,6 +312,8 @@ class TemplateResponder:
             return "I'm not sure what you want me to do."
 
         if outcome.kind == "target_not_found":
+            if outcome.target_type == "project":
+                return f"I couldn't find a project called {_quoted(outcome.target)}."
             if outcome.target_type == "list":
                 return f"I couldn't find that active list or list item: {_quoted(outcome.target)}."
             if outcome.target_type == "note":

@@ -11,6 +11,11 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class GroundedProjectReference:
+    name: str
+
+
+@dataclass(frozen=True)
 class GroundedTaskReference:
     title: str
     project_name: str
@@ -19,7 +24,26 @@ class GroundedTaskReference:
 class ConversationContextStore:
     def __init__(self, max_users: int = 256) -> None:
         self._max_users = max_users
+        self._last_project_by_user: dict[
+            uuid.UUID, GroundedProjectReference
+        ] = {}
         self._last_task_by_user: dict[uuid.UUID, GroundedTaskReference] = {}
+
+    def get_last_project(
+        self, user_id: uuid.UUID
+    ) -> GroundedProjectReference | None:
+        return self._last_project_by_user.get(user_id)
+
+    def set_last_project(
+        self, user_id: uuid.UUID, ref: GroundedProjectReference
+    ) -> None:
+        if (
+            len(self._last_project_by_user) >= self._max_users
+            and user_id not in self._last_project_by_user
+        ):
+            oldest = next(iter(self._last_project_by_user))
+            self._last_project_by_user.pop(oldest, None)
+        self._last_project_by_user[user_id] = ref
 
     def get_last_task(
         self, user_id: uuid.UUID

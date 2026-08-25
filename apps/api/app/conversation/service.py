@@ -30,8 +30,9 @@ from app.models.activity import Activity
 from app.models.user import User
 
 from app.projects.service import ProjectsService
+from app.projects.schemas import ProjectCreate
 from app.tasks.service import TasksService
-from app.tasks.schemas import TaskUpdate
+from app.tasks.schemas import TaskCreate, TaskUpdate
 from app.activity.service import ActivityService
 from app.core.time import (
     Clock,
@@ -52,6 +53,7 @@ from app.lists.service import ListsService
 from app.conversation import registry
 from app.conversation.context import (
     ConversationContextStore,
+    GroundedProjectReference,
     GroundedTaskReference,
 )
 from app.conversation.exceptions import (
@@ -90,6 +92,29 @@ from app.conversation.understanding import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _target_type_for_action(
+    action: str,
+) -> str:
+    if action in {registry.PROJECT_LIST, registry.PROJECT_CREATE}:
+        return "project"
+    if action in {registry.TASK_LIST, registry.TASK_CREATE, registry.TASK_UPDATE}:
+        return "task"
+    if action in {registry.REMINDER_COMPLETE, registry.REMINDER_CANCEL}:
+        return "reminder"
+    if action in {registry.NOTIFICATION_READ, registry.NOTIFICATION_DISMISS}:
+        return "notification"
+    if action in {registry.NOTE_CREATE, registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
+        return "note"
+    if action in {
+        registry.LIST_CREATE,
+        registry.LIST_ADD_ITEM,
+        registry.LIST_COMPLETE_ITEM,
+        registry.LIST_ARCHIVE,
+    }:
+        return "list"
+    return "task"
 
 
 class ConversationService:
@@ -372,41 +397,7 @@ class ConversationService:
                 kind="target_not_found",
                 executed=False,
                 target=exc.target,
-                target_type=(
-                    "reminder"
-                    if result.action in {
-                        registry.REMINDER_COMPLETE,
-                        registry.REMINDER_CANCEL,
-                    }
-                    else (
-                        "notification"
-                        if result.action
-                        in {
-                            registry.NOTIFICATION_READ,
-                            registry.NOTIFICATION_DISMISS,
-                        }
-                        else (
-                            "note"
-                            if result.action
-                            in {
-                                registry.NOTE_CREATE,
-                                registry.NOTE_UPDATE,
-                                registry.NOTE_ARCHIVE,
-                            }
-                            else (
-                                "list"
-                                if result.action
-                                in {
-                                    registry.LIST_CREATE,
-                                    registry.LIST_ADD_ITEM,
-                                    registry.LIST_COMPLETE_ITEM,
-                                    registry.LIST_ARCHIVE,
-                                }
-                                else "task"
-                            )
-                        )
-                    )
-                ),
+                target_type=_target_type_for_action(result.action),
             )
         except AmbiguousReferenceError as exc:
             return Outcome(
@@ -449,6 +440,56 @@ class ConversationService:
                 executed=True,
                 action=action.action,
                 project_names=tuple(p.name for p in projects),
+            )
+
+        if action.action == registry.PROJECT_CREATE:
+            assert action.project_name is not None
+            project = await self._projects.create_project(
+                current_user,
+                ProjectCreate(name=action.project_name),
+            )
+            return Outcome(
+                kind="project_created",
+                executed=True,
+                action=action.action,
+                project_name=project.name,
+            )
+
+        if action.action == registry.TASK_CREATE:
+            assert action.task_title is not None
+            project_id = action.project_id
+            project_name = action.project_name
+            if project_id is None:
+                try:
+                    project = self._resolve_context_project(
+                        current_user, world
+                    )
+                except CompletionTargetNotFoundError as exc:
+                    return Outcome(
+                        kind="target_not_found",
+                        executed=False,
+                        target=exc.target,
+                        target_type="project",
+                    )
+                except AmbiguousReferenceError as exc:
+                    return Outcome(
+                        kind="ambiguous",
+                        executed=False,
+                        candidates=tuple(exc.candidates),
+                    )
+                project_id = project.project_id
+                project_name = project.name
+            task = await self._tasks.create_task(
+                current_user,
+                project_id,
+                TaskCreate(title=action.task_title),
+            )
+            return Outcome(
+                kind="task_created",
+                executed=True,
+                action=action.action,
+                task_title=task.title,
+                project_name=project_name,
             )
 
         if action.action == registry.TASK_LIST:
@@ -770,6 +811,38 @@ class ConversationService:
                 raise CompletionTargetNotFoundError("projects")
             return ResolvedAction(action=registry.PROJECT_LIST)
 
+        if proposal.action == registry.PROJECT_CREATE:
+            if proposal.reference or set(arguments) != {"name"}:
+                raise CompletionTargetNotFoundError("that project")
+            name = arguments.get("name")
+            if not name:
+                raise CompletionTargetNotFoundError("that project")
+            return ResolvedAction(
+                action=registry.PROJECT_CREATE,
+                project_name=name,
+            )
+
+        if proposal.action == registry.TASK_CREATE:
+            if set(arguments) != {"title"}:
+                raise CompletionTargetNotFoundError("that task")
+            title = arguments.get("title")
+            if not title:
+                raise CompletionTargetNotFoundError("that task")
+            if proposal.reference:
+                project = self._resolve_project_reference(
+                    proposal.reference, world
+                )
+                return ResolvedAction(
+                    action=registry.TASK_CREATE,
+                    project_id=project.project_id,
+                    project_name=project.name,
+                    task_title=title,
+                )
+            return ResolvedAction(
+                action=registry.TASK_CREATE,
+                task_title=title,
+            )
+
         if proposal.action == registry.TASK_LIST:
             if arguments:
                 raise CompletionTargetNotFoundError("tasks")
@@ -957,6 +1030,9 @@ class ConversationService:
         self, reference: str | None, world: WorldView
     ) -> ProjectRef:
         target = (reference or "").strip().lower()
+        exact = [p for p in world.projects if p.name.lower() == target]
+        if len(exact) == 1:
+            return exact[0]
         matches = [
             p
             for p in world.projects
@@ -967,6 +1043,16 @@ class ConversationService:
         if len(matches) > 1:
             raise AmbiguousReferenceError([p.name for p in matches])
         raise CompletionTargetNotFoundError(target or "that project")
+
+    def _resolve_context_project(
+        self, current_user: User, world: WorldView
+    ) -> ProjectRef:
+        if self._context_store is None:
+            raise CompletionTargetNotFoundError("a project")
+        ref = self._context_store.get_last_project(current_user.id)
+        if ref is None:
+            raise CompletionTargetNotFoundError("a project")
+        return self._resolve_project_reference(ref.name, world)
 
     def _resolve_reminder_reference(
         self, reference: str | None, world: WorldView
@@ -1049,16 +1135,23 @@ class ConversationService:
     def _context_payload(self, current_user: User) -> dict | None:
         if self._context_store is None:
             return None
-        ref = self._context_store.get_last_task(current_user.id)
-        if ref is None:
+        task_ref = self._context_store.get_last_task(current_user.id)
+        project_ref = self._context_store.get_last_project(current_user.id)
+        if task_ref is None and project_ref is None:
             return None
-        return {
-            "last_grounded_entity": {
+        payload: dict = {}
+        if task_ref is not None:
+            payload["last_grounded_entity"] = {
                 "kind": "task",
-                "title": ref.title,
-                "project": ref.project_name,
+                "title": task_ref.title,
+                "project": task_ref.project_name,
             }
-        }
+        if project_ref is not None:
+            payload["last_grounded_project"] = {
+                "kind": "project",
+                "name": project_ref.name,
+            }
+        return payload
 
     def _context_payload_user_task(self) -> GroundedTaskReference | None:
         # Set transiently by _outcome_from_understanding for the current turn.
@@ -1074,6 +1167,11 @@ class ConversationService:
                     title=outcome.task_title,
                     project_name=outcome.project_name,
                 ),
+            )
+        if outcome.project_name:
+            self._context_store.set_last_project(
+                current_user.id,
+                GroundedProjectReference(name=outcome.project_name),
             )
 
     def _window_recent(

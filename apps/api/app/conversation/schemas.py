@@ -24,7 +24,9 @@ class ResolvedAction(BaseModel):
 
     action: str
     project_id: uuid.UUID | None = None
+    project_name: str | None = None
     task_id: uuid.UUID | None = None
+    task_title: str | None = None
     status: str | None = None
     recall_window: str | None = None
     reminder_id: uuid.UUID | None = None

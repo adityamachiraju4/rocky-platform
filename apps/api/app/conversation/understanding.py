@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.conversation import registry
 from app.conversation.resolver import WorldView
 
 
@@ -163,28 +164,7 @@ def safe_world_payload(world: WorldView) -> dict[str, Any]:
     """Bounded, non-secret world representation for language understanding."""
 
     return {
-        "allowed_actions": [
-            "project.list",
-            "task.list",
-            "task.update",
-            "activity.recall",
-            "reminder.create",
-            "reminder.list",
-            "reminder.complete",
-            "reminder.cancel",
-            "notification.list",
-            "notification.read",
-            "notification.dismiss",
-            "note.create",
-            "note.list",
-            "note.update",
-            "note.archive",
-            "list.create",
-            "list.list",
-            "list.add_item",
-            "list.complete_item",
-            "list.archive",
-        ],
+        "allowed_actions": list(registry.ACTION_NAMES),
         "projects": [
             {"name": p.name}
             for p in world.projects[:25]

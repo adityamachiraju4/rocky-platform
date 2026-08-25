@@ -197,6 +197,20 @@ class HardcodedResolver:
 
         from app.reminders.interpretation import extract_reminder_intent
 
+        project_create = re.fullmatch(
+            (
+                r"(?:create|make|start)\s+(?:a\s+|new\s+|a\s+new\s+)?"
+                r"project\s+(?:called\s+|named\s+)?(.+)"
+            ),
+            message.strip(),
+            re.IGNORECASE,
+        )
+        if project_create:
+            return ResolvedAction(
+                action=registry.PROJECT_CREATE,
+                project_name=project_create.group(1).strip(" ."),
+            )
+
         reminder_intent = extract_reminder_intent(message)
         if reminder_intent is not None:
             return ResolvedAction(
@@ -248,6 +262,10 @@ class HardcodedResolver:
                 action=registry.LIST_ARCHIVE, list_id=value.list_id,
                 list_title=value.title,
             )
+
+        task_create = _resolve_task_create(message, world)
+        if task_create is not None:
+            return task_create
 
         note_that = re.fullmatch(
             r"(?:make|create)\s+(?:me\s+)?a\s+note\s+that\s+(.+)",
@@ -500,6 +518,77 @@ class HardcodedResolver:
 
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text)
+
+
+def _resolve_task_create(message: str, world: WorldView) -> ResolvedAction | None:
+    text = message.strip()
+    patterns = (
+        (
+            r"(?:create|add)\s+a\s+task\s+called\s+(.+?)\s+in\s+(.+)",
+            1,
+            2,
+        ),
+        (
+            r"add\s+a\s+task\s+to\s+(.+?)\s+called\s+(.+)",
+            2,
+            1,
+        ),
+        (
+            r"create\s+(.+?)\s+under\s+(.+)",
+            1,
+            2,
+        ),
+        (
+            r"add\s+(.+?)\s+to\s+the\s+(.+?)\s+project",
+            1,
+            2,
+        ),
+        (
+            r"add\s+(.+?)\s+to\s+(.+)",
+            1,
+            2,
+        ),
+    )
+    for pattern, title_group, project_group in patterns:
+        match = re.fullmatch(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        project = _resolve_project_name(match.group(project_group), world)
+        return ResolvedAction(
+            action=registry.TASK_CREATE,
+            project_id=project.project_id,
+            project_name=project.name,
+            task_title=match.group(title_group).strip(" ."),
+        )
+
+    no_project = re.fullmatch(
+        r"(?:create|add)\s+a\s+task\s+called\s+(.+)",
+        text,
+        re.IGNORECASE,
+    )
+    if no_project:
+        return ResolvedAction(
+            action=registry.TASK_CREATE,
+            task_title=no_project.group(1).strip(" ."),
+        )
+    return None
+
+
+def _resolve_project_name(target: str, world: WorldView) -> ProjectRef:
+    wanted = target.strip().lower()
+    exact = [p for p in world.projects if p.name.lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    matches = [
+        p
+        for p in world.projects
+        if wanted and (wanted in p.name.lower() or p.name.lower() in wanted)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise AmbiguousReferenceError([p.name for p in matches])
+    raise CompletionTargetNotFoundError(wanted or "that project")
 
 
 def _resolve_note_title(target: str, world: WorldView) -> NoteRef:

@@ -32,7 +32,9 @@ Classify the user's utterance as one of:
 
 Allowed actions are exactly:
 - project.list
+- project.create
 - task.list
+- task.create
 - task.update
 - activity.recall
 - reminder.create
@@ -52,6 +54,12 @@ Allowed actions are exactly:
 - list.complete_item
 - list.archive
 
+For project.create, use only arguments {"name": ...}. Never include owner,
+status, timestamps, or database IDs.
+For task.create, use the project title as reference when the user names a
+project and only arguments {"title": ...}. If the user clearly relies on the
+last grounded project, omit the reference. Never include project IDs, owner,
+status, timestamps, or completed_at.
 For task.update, use a human reference such as "homepage" and arguments
 {"status": "complete"}. Never return database IDs. Never invent actions.
 For recall, use activity.recall and set recall_window to "yesterday" only for

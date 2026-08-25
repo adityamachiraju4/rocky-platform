@@ -48,6 +48,7 @@ from app.models.user import User
 
 import app.models  # noqa: F401  (populate Base.metadata before create_all)
 
+from app.conversation import registry
 from app.conversation.service import ConversationService
 from app.conversation.exceptions import UnknownActionError
 from app.conversation.dependencies import get_understanding_provider
@@ -60,6 +61,7 @@ from app.conversation.understanding import (
     UnderstandingProviderError,
     UnderstandingResult,
     Unsupported,
+    safe_world_payload,
 )
 
 SECRET = "test-secret-key"
@@ -848,6 +850,148 @@ def test_understanding_schema_is_strict_responses_api_shape() -> None:
     assert UNDERSTANDING_JSON_SCHEMA["additionalProperties"] is False
     assert set(UNDERSTANDING_JSON_SCHEMA["required"]) == set(properties)
     assert "null" in properties["reply"]["type"]
+
+
+def test_provider_allowed_actions_stay_synced_with_registry() -> None:
+    payload = safe_world_payload(WorldView(projects=(), tasks=()))
+
+    assert payload["allowed_actions"] == list(registry.ACTION_NAMES)
+
+
+@pytest.mark.asyncio
+async def test_create_project_via_conversation(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Create a project called Website Redesign"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is True
+    assert body["action"] == "project.create"
+    assert "Website Redesign" in body["reply"]
+    assert "project.create" not in body["reply"]
+
+    projects = await client.get("/projects", headers=headers)
+    assert [project["name"] for project in projects.json()] == [
+        "Website Redesign"
+    ]
+    activity = await _get_activity(client, headers)
+    assert any(
+        item["event_type"] == "project.created"
+        and item["payload"]["name"] == "Website Redesign"
+        for item in activity
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_task_via_conversation_resolves_project_name(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="TestDev")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Add a task to TestDev called Fix mobile navigation"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.create"
+    assert "Fix mobile navigation" in body["reply"]
+    assert "TestDev" in body["reply"]
+    assert project_id not in body["reply"]
+
+    tasks = await client.get(f"/projects/{project_id}/tasks", headers=headers)
+    assert [task["title"] for task in tasks.json()] == [
+        "Fix mobile navigation"
+    ]
+    activity = await _get_activity(client, headers)
+    assert any(
+        item["event_type"] == "task.created"
+        and item["payload"]["title"] == "Fix mobile navigation"
+        for item in activity
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_task_can_use_last_grounded_project(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    created_project = await client.post(
+        "/conversation",
+        json={"message": "Create a project called Atlas"},
+        headers=headers,
+    )
+    assert created_project.json()["action"] == "project.create"
+
+    created_task = await client.post(
+        "/conversation",
+        json={"message": "Add a task called Build landing page"},
+        headers=headers,
+    )
+
+    assert created_task.json()["executed"] is True
+    assert created_task.json()["action"] == "task.create"
+    assert "Atlas" in created_task.json()["reply"]
+    projects = await client.get("/projects", headers=headers)
+    project_id = projects.json()[0]["id"]
+    tasks = await client.get(f"/projects/{project_id}/tasks", headers=headers)
+    assert [task["title"] for task in tasks.json()] == ["Build landing page"]
+
+
+@pytest.mark.asyncio
+async def test_create_task_ambiguous_project_name_fails_closed(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    first = await _make_project(client, headers, name="TestDev")
+    second = await _make_project(client, headers, name="TestDev Mobile")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Create a task called Fix login under Test"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is False
+    for project_id in (first, second):
+        tasks = await client.get(f"/projects/{project_id}/tasks", headers=headers)
+        assert tasks.json() == []
+
+
+@pytest.mark.asyncio
+async def test_provider_task_create_rejects_extra_arguments(ctx) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="task.create",
+            reference="TestDev",
+            arguments={
+                "title": "Fix mobile navigation",
+                "user_id": str(uuid.uuid4()),
+            },
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="TestDev")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Add the mobile navigation fix"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is False
+    tasks = await client.get(f"/projects/{project_id}/tasks", headers=headers)
+    assert tasks.json() == []
 
 
 @pytest.mark.asyncio
