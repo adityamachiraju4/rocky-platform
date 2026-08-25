@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import AppShell from "../AppShell";
 import { ApiError, AuthExpiredError, sendConversation, synthesizeSpeech, transcribeAudio } from "../api";
 import { useResource } from "../useApi";
@@ -62,6 +62,7 @@ const SPEECH_DEBUG =
 const RECORDING_MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
+  "audio/mp4;codecs=mp4a.40.2",
   "audio/mp4",
   "audio/ogg;codecs=opus",
   "audio/ogg",
@@ -70,6 +71,7 @@ const SPEECH_LEVEL_THRESHOLD = 0.035;
 const SILENCE_STOP_MS = 900;
 const MIN_RECORDING_MS = 700;
 const MAX_RECORDING_MS = 30_000;
+const SPOKEN_OUTPUT_KEY = "rocky.spoken-output";
 
 // Resolve an activity event to the in-app route for its entity, when we can.
 // task.* -> the owning project's detail page; project.* -> that project.
@@ -129,7 +131,46 @@ function recordingMimeType(): string | undefined {
 function recordingFilename(type: string | undefined): string {
   if (type?.includes("mp4")) return "rocky-voice.mp4";
   if (type?.includes("ogg")) return "rocky-voice.ogg";
+  if (type?.includes("aac")) return "rocky-voice.aac";
+  if (type?.includes("wav")) return "rocky-voice.wav";
   return "rocky-voice.webm";
+}
+
+function initialSpokenOutput(): boolean {
+  try {
+    return window.localStorage.getItem(SPOKEN_OUTPUT_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function microphoneErrorMessage(error: unknown): string {
+  if (!window.isSecureContext) return "Microphone access requires a secure connection.";
+  if (!(error instanceof DOMException)) return "Microphone could not start. Please try again.";
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    return "Microphone access wasn't allowed. You can keep typing.";
+  }
+  if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+    return "No microphone was found. You can keep typing.";
+  }
+  if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+    return "The microphone is busy. Close other audio apps and try again.";
+  }
+  if (error.name === "AbortError") return "Microphone startup was interrupted. Please try again.";
+  return "Microphone could not start. Please try again.";
+}
+
+function recognitionErrorMessage(error: string): string {
+  if (error === "not-allowed" || error === "service-not-allowed") {
+    return "Microphone access wasn't allowed. You can keep typing.";
+  }
+  if (error === "audio-capture") return "No available microphone was found. You can keep typing.";
+  if (error === "no-speech") return "I couldn't hear anything to send.";
+  return "Voice input stopped. Please try again or keep typing.";
+}
+
+function usesCoarsePointer(): boolean {
+  return window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 }
 
 function audioContextCtor(): typeof AudioContext | null {
@@ -157,14 +198,18 @@ function RockyInteraction({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
+  const [micStarting, setMicStarting] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [spokenOutput, setSpokenOutput] = useState(true);
+  const [spokenOutput, setSpokenOutput] = useState(initialSpokenOutput);
+  const spokenOutputRef = useRef(spokenOutput);
   const [interactionState, setInteractionState] = useState<InteractionState>("idle");
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const voiceAudioContextRef = useRef<AudioContext | null>(null);
+  const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
   const voiceFrameRef = useRef<number | null>(null);
   const maxRecordingTimerRef = useRef<number | null>(null);
   const recordingStartedAtRef = useRef(0);
@@ -172,18 +217,37 @@ function RockyInteraction({
   const voiceRoundTripStartedAtRef = useRef<number | null>(null);
   const speechDetectedRef = useRef(false);
   const silenceStartedAtRef = useRef<number | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const latestResponseRef = useRef<HTMLDivElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const speechAbortRef = useRef<AbortController | null>(null);
+  const speechIdRef = useRef(0);
+  const browserSpeechTimerRef = useRef<number | null>(null);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const turnIdRef = useRef(0);
+  const turnLockedRef = useRef(false);
+  const recordingStartingRef = useRef(false);
+  const lifecycleActiveRef = useRef(true);
+  const followResponseRef = useRef(true);
   const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
   const recognitionSupported = typeof window !== "undefined" && speechRecognitionCtor() !== null;
   const recordingSupported = typeof navigator !== "undefined"
     && !!navigator.mediaDevices?.getUserMedia
     && mediaRecorderCtor() !== null;
   const voiceSupported = recordingSupported || recognitionSupported;
+  const voiceUnavailableMessage = typeof window !== "undefined" && !window.isSecureContext
+    ? "Voice input requires a secure connection. Typing is still available."
+    : "Voice input is unavailable in this browser. Typing is still available.";
   const currentState = stateCopy(interactionState);
   const hasDraft = draft.trim().length > 0;
+
+  const resizeComposer = useCallback(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 132)}px`;
+  }, []);
 
   const cleanupVoiceDetection = useCallback(() => {
     if (voiceFrameRef.current !== null) {
@@ -196,6 +260,10 @@ function RockyInteraction({
     }
     const context = voiceAudioContextRef.current;
     voiceAudioContextRef.current = null;
+    voiceSourceRef.current?.disconnect();
+    voiceSourceRef.current = null;
+    voiceAnalyserRef.current?.disconnect();
+    voiceAnalyserRef.current = null;
     if (context && context.state !== "closed") {
       void context.close();
     }
@@ -213,8 +281,13 @@ function RockyInteraction({
   }, [cleanupVoiceDetection, stopMediaStream]);
 
   const stopRockySpeech = useCallback(() => {
+    speechIdRef.current += 1;
     speechAbortRef.current?.abort();
     speechAbortRef.current = null;
+    if (browserSpeechTimerRef.current !== null) {
+      window.clearTimeout(browserSpeechTimerRef.current);
+      browserSpeechTimerRef.current = null;
+    }
     if (audioSourceRef.current) {
       audioSourceRef.current.onended = null;
       try {
@@ -228,9 +301,37 @@ function RockyInteraction({
     setInteractionState((state) => (state === "speaking" ? "idle" : state));
   }, []);
 
+  const closePlaybackContext = useCallback(() => {
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context && context.state !== "closed") void context.close();
+  }, []);
+
+  const cancelActiveTurn = useCallback((updateUi: boolean) => {
+    turnIdRef.current += 1;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
+    turnLockedRef.current = false;
+    recordingStartingRef.current = false;
+    if (updateUi) {
+      setSubmitting(false);
+      setListening(false);
+      setMicStarting(false);
+      setInteractionState("idle");
+    }
+  }, []);
+
   useEffect(() => {
     const stopVoiceForLifecycle = () => {
-      recognitionRef.current?.stop();
+      lifecycleActiveRef.current = false;
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      if (recognition) {
+        recognition.onend = null;
+        recognition.onerror = null;
+        recognition.onresult = null;
+        recognition.stop();
+      }
       const recorder = mediaRecorderRef.current;
       if (recorder?.state === "recording") {
         recorder.ondataavailable = null;
@@ -239,18 +340,30 @@ function RockyInteraction({
       }
       cleanupRecording();
       stopRockySpeech();
-      setListening(false);
-      setInteractionState("idle");
+      closePlaybackContext();
+      cancelActiveTurn(true);
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") stopVoiceForLifecycle();
+      else lifecycleActiveRef.current = true;
     };
+    const onPageShow = () => { lifecycleActiveRef.current = true; };
     window.addEventListener("pagehide", stopVoiceForLifecycle);
+    window.addEventListener("pageshow", onPageShow);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      lifecycleActiveRef.current = false;
       window.removeEventListener("pagehide", stopVoiceForLifecycle);
+      window.removeEventListener("pageshow", onPageShow);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      recognitionRef.current?.stop();
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      if (recognition) {
+        recognition.onend = null;
+        recognition.onerror = null;
+        recognition.onresult = null;
+        recognition.stop();
+      }
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.ondataavailable = null;
         mediaRecorderRef.current.onstop = null;
@@ -258,17 +371,53 @@ function RockyInteraction({
       }
       cleanupRecording();
       stopRockySpeech();
+      closePlaybackContext();
+      cancelActiveTurn(false);
     };
-  }, [cleanupRecording, stopRockySpeech]);
+  }, [cancelActiveTurn, cleanupRecording, closePlaybackContext, stopRockySpeech]);
 
-  const speakBrowser = (reply: string) => {
+  useEffect(() => {
+    const active = submitting || micStarting || interactionState !== "idle";
+    document.documentElement.dataset.voiceActive = active ? "true" : "false";
+    window.dispatchEvent(new CustomEvent("rocky:voice-activity", { detail: active }));
+    return () => {
+      delete document.documentElement.dataset.voiceActive;
+      window.dispatchEvent(new CustomEvent("rocky:voice-activity", { detail: false }));
+    };
+  }, [interactionState, micStarting, submitting]);
+
+  const speakBrowser = (reply: string, speechId: number) => {
     if (!speechSupported) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(reply);
-    utterance.onend = () => setInteractionState("idle");
-    utterance.onerror = () => setInteractionState("idle");
+    utterance.onend = () => {
+      if (speechIdRef.current === speechId) {
+        if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
+        browserSpeechTimerRef.current = null;
+        setInteractionState("idle");
+      }
+    };
+    utterance.onerror = () => {
+      if (speechIdRef.current === speechId) {
+        if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
+        browserSpeechTimerRef.current = null;
+        setInteractionState("idle");
+      }
+    };
     setInteractionState("speaking");
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.speak(utterance);
+      browserSpeechTimerRef.current = window.setTimeout(() => {
+        if (speechIdRef.current !== speechId) return;
+        window.speechSynthesis.cancel();
+        browserSpeechTimerRef.current = null;
+        setInteractionState("idle");
+        setVoiceError("Audio playback stopped. The text response is still available; use Replay to try again.");
+      }, Math.max(15_000, Math.min(120_000, reply.length * 90)));
+    } catch {
+      setInteractionState("idle");
+      setVoiceError("Audio couldn't start. The text response is still available; use Replay to try again.");
+    }
   };
 
   const ensureAudioContext = async (): Promise<AudioContext> => {
@@ -298,13 +447,14 @@ function RockyInteraction({
   const playNeuralSpeech = async (
     audio: Blob,
     controller: AbortController,
+    speechId: number,
   ) => {
     const ctx = await ensureAudioContext();
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || speechIdRef.current !== speechId) return;
     const buffer = await audio.arrayBuffer();
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || speechIdRef.current !== speechId) return;
     const decoded = await ctx.decodeAudioData(buffer);
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted || speechIdRef.current !== speechId) return;
 
     const source = ctx.createBufferSource();
     source.buffer = decoded;
@@ -312,7 +462,7 @@ function RockyInteraction({
     audioSourceRef.current = source;
     setInteractionState("speaking");
     source.onended = () => {
-      if (audioSourceRef.current === source) {
+      if (audioSourceRef.current === source && speechIdRef.current === speechId) {
         audioSourceRef.current = null;
         setInteractionState("idle");
       }
@@ -327,8 +477,9 @@ function RockyInteraction({
   };
 
   const speak = async (reply: string) => {
-    if (!spokenOutput) return;
+    if (!spokenOutputRef.current || !lifecycleActiveRef.current) return;
     stopRockySpeech();
+    const speechId = speechIdRef.current;
     if (reply.length > MAX_AUTO_SPEECH_CHARS) {
       setVoiceError("Rocky's reply is too long for automatic speech.");
       return;
@@ -341,7 +492,7 @@ function RockyInteraction({
     speechDebug("speech request started");
     try {
       const response = await synthesizeSpeech({ text: reply }, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || speechIdRef.current !== speechId) return;
       speechDebug("speech response", {
         elapsedMs: Math.round(performance.now() - speechStartedAt),
         status: response.status,
@@ -354,57 +505,89 @@ function RockyInteraction({
       if (response.blob.size === 0) {
         throw new Error("empty_blob");
       }
-      await playNeuralSpeech(response.blob, controller);
+      await playNeuralSpeech(response.blob, controller, speechId);
     } catch (e: unknown) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || speechIdRef.current !== speechId) return;
       speechDebug("neural playback failed", {
         name: e instanceof Error ? e.name : typeof e,
         message: e instanceof Error ? e.message : String(e),
       });
       stopRockySpeech();
-      speakBrowser(reply);
+      const browserSpeechId = speechIdRef.current;
+      speakBrowser(reply, browserSpeechId);
       if (speechSupported) {
         setVoiceError(
           e instanceof ApiError
             ? "Neural speech is unavailable; using browser voice."
-            : "Unable to play Rocky's neural voice; using browser voice.",
+            : "Audio playback was blocked; using the browser voice. Replay is also available.",
         );
       } else {
         setVoiceError(
-          e instanceof Error ? e.message : "Rocky could not speak the reply.",
+          "Audio couldn't start. The text response is still available; use Replay to try again.",
         );
       }
     }
   };
 
-  const submitMessage = async (message: string) => {
-    const text = message.trim();
-    if (!text || submitting) return;
-    stopRockySpeech();
+  const beginTurn = (): { id: number; controller: AbortController } | null => {
+    if (turnLockedRef.current || recordingStartingRef.current) return null;
+    turnLockedRef.current = true;
+    const id = turnIdRef.current + 1;
+    turnIdRef.current = id;
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     setSubmitting(true);
+    return { id, controller };
+  };
+
+  const isCurrentTurn = (id: number, controller: AbortController): boolean =>
+    lifecycleActiveRef.current
+    && turnIdRef.current === id
+    && requestAbortRef.current === controller
+    && !controller.signal.aborted;
+
+  const finishTurn = (id: number, controller: AbortController) => {
+    if (turnIdRef.current !== id || requestAbortRef.current !== controller) return;
+    requestAbortRef.current = null;
+    turnLockedRef.current = false;
+    setSubmitting(false);
+    setInteractionState((state) =>
+      state === "thinking" || state === "transcribing" ? "idle" : state,
+    );
+  };
+
+  const runConversation = async (
+    text: string,
+    id: number,
+    controller: AbortController,
+  ) => {
     setInteractionState("thinking");
-    setError(null);
-    setVoiceError(null);
-    setDraft("");
     const conversationStartedAt = performance.now();
     speechDebug("conversation request started");
-
     try {
       const result = await sendConversation({
         message: text,
         timezone: browserTimezone(),
-      });
+      }, controller.signal);
+      if (!isCurrentTurn(id, controller)) return;
       speechDebug("conversation response", {
         elapsedMs: Math.round(performance.now() - conversationStartedAt),
       });
       setResponse(result);
-      inputRef.current?.focus();
       setInteractionState("idle");
-      void speak(result.reply);
-      if (result.executed) {
-        onMutatingAction();
+      if (!usesCoarsePointer()) inputRef.current?.focus();
+      const composerRect = inputRef.current?.getBoundingClientRect();
+      if (followResponseRef.current && (!composerRect || (composerRect.bottom >= 0 && composerRect.top <= window.innerHeight))) {
+        window.requestAnimationFrame(() => latestResponseRef.current?.scrollIntoView({
+          block: "nearest",
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        }));
       }
+      if (result.executed) onMutatingAction();
+      finishTurn(id, controller);
+      void speak(result.reply);
     } catch (e: unknown) {
+      if (!isCurrentTurn(id, controller)) return;
       if (e instanceof AuthExpiredError) {
         setError("Your session expired. Please sign in again.");
       } else {
@@ -412,18 +595,35 @@ function RockyInteraction({
       }
       setInteractionState("idle");
     } finally {
-      setSubmitting(false);
+      finishTurn(id, controller);
     }
   };
 
+  const submitMessage = async (message: string) => {
+    const text = message.trim();
+    if (!text) return;
+    const turn = beginTurn();
+    if (!turn) return;
+    stopRockySpeech();
+    setError(null);
+    setVoiceError(null);
+    setDraft("");
+    window.requestAnimationFrame(resizeComposer);
+    const rect = inputRef.current?.getBoundingClientRect();
+    followResponseRef.current = !rect || (rect.bottom >= 0 && rect.top <= window.innerHeight);
+    await runConversation(text, turn.id, turn.controller);
+  };
+
   const submitTranscription = async (audio: Blob, filename: string) => {
+    const turn = beginTurn();
+    if (!turn) return;
     try {
-      setSubmitting(true);
       setInteractionState("transcribing");
       setVoiceError(null);
       const transcriptionStartedAt = performance.now();
       speechDebug("transcription request started", { blobSize: audio.size });
-      const result = await transcribeAudio(audio, filename);
+      const result = await transcribeAudio(audio, filename, turn.controller.signal);
+      if (!isCurrentTurn(turn.id, turn.controller)) return;
       speechDebug("transcription response", {
         elapsedMs: Math.round(performance.now() - transcriptionStartedAt),
       });
@@ -431,21 +631,21 @@ function RockyInteraction({
       if (!text) {
         setVoiceError("I couldn't hear anything to send.");
         setInteractionState("idle");
-        setSubmitting(false);
         return;
       }
-      setSubmitting(false);
-      await submitMessage(text);
+      await runConversation(text, turn.id, turn.controller);
     } catch (e: unknown) {
+      if (!isCurrentTurn(turn.id, turn.controller)) return;
       if (e instanceof AuthExpiredError) {
         setError("Your session expired. Please sign in again.");
       } else if (e instanceof ApiError) {
         setVoiceError(e.message || "I couldn't transcribe that audio.");
       } else {
-        setVoiceError(e instanceof Error ? e.message : "Recording could not be transcribed.");
+        setVoiceError("Recording could not be transcribed. Please try again.");
       }
       setInteractionState("idle");
-      setSubmitting(false);
+    } finally {
+      finishTurn(turn.id, turn.controller);
     }
   };
 
@@ -480,6 +680,8 @@ function RockyInteraction({
 
     const source = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
+    voiceSourceRef.current = source;
+    voiceAnalyserRef.current = analyser;
     analyser.fftSize = 1024;
     source.connect(analyser);
 
@@ -524,16 +726,46 @@ function RockyInteraction({
     void submitMessage(text);
   };
 
+  const onComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.nativeEvent.isComposing
+      || usesCoarsePointer()
+    ) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  };
+
   const startListening = async () => {
+    if (
+      turnLockedRef.current
+      || recordingStartingRef.current
+      || mediaRecorderRef.current?.state === "recording"
+      || recognitionRef.current
+    ) return;
+    recordingStartingRef.current = true;
+    setMicStarting(true);
     unlockAudioPlayback();
     stopRockySpeech();
     if (recordingSupported) {
+      let stream: MediaStream | null = null;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mimeType = recordingMimeType();
-        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-        audioChunksRef.current = [];
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!lifecycleActiveRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         mediaStreamRef.current = stream;
+        const mimeType = recordingMimeType();
+        let recorder: MediaRecorder;
+        try {
+          recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        } catch (error) {
+          if (!mimeType) throw error;
+          recorder = new MediaRecorder(stream);
+        }
+        audioChunksRef.current = [];
         mediaRecorderRef.current = recorder;
         recordingStartedAtRef.current = performance.now();
         recordingStopRequestedAtRef.current = null;
@@ -547,7 +779,10 @@ function RockyInteraction({
           }
         };
         recorder.onerror = () => {
+          recorder.onstop = null;
           setVoiceError("Recording failed.");
+          audioChunksRef.current = [];
+          recordingStartingRef.current = false;
           setListening(false);
           setInteractionState("idle");
           cleanupRecording();
@@ -571,7 +806,7 @@ function RockyInteraction({
             setInteractionState("idle");
             return;
           }
-          const type = mimeType || recorder.mimeType || "audio/webm";
+          const type = recorder.mimeType || mimeType || "audio/webm";
           const audio = new Blob(chunks, { type });
           if (audio.size === 0) {
             setVoiceError("I couldn't hear anything to send.");
@@ -581,6 +816,7 @@ function RockyInteraction({
           void submitTranscription(audio, recordingFilename(type));
         };
         recorder.start();
+        recordingStartingRef.current = false;
         void startSilenceDetection(stream, recorder).catch(() => {
           maxRecordingTimerRef.current = window.setTimeout(
             () => stopActiveRecorder("max-duration"),
@@ -591,22 +827,22 @@ function RockyInteraction({
         setInteractionState("listening");
         setVoiceError(null);
       } catch (e: unknown) {
-        if (e instanceof DOMException && e.name === "NotAllowedError") {
-          setVoiceError("Microphone permission was denied.");
-        } else if (e instanceof DOMException && e.name === "NotFoundError") {
-          setVoiceError("No microphone was found.");
-        } else {
-          setVoiceError("Recording could not start.");
-        }
+        stream?.getTracks().forEach((track) => track.stop());
+        setVoiceError(microphoneErrorMessage(e));
         setInteractionState("idle");
         setListening(false);
         cleanupRecording();
+      } finally {
+        recordingStartingRef.current = false;
+        if (lifecycleActiveRef.current) setMicStarting(false);
       }
       return;
     }
 
     const Recognition = speechRecognitionCtor();
     if (!Recognition) {
+      recordingStartingRef.current = false;
+      setMicStarting(false);
       setVoiceError("Voice input is not available in this browser.");
       return;
     }
@@ -621,11 +857,13 @@ function RockyInteraction({
       setVoiceError(null);
     };
     recognition.onend = () => {
+      recognitionRef.current = null;
       setListening(false);
       setInteractionState((state) => (state === "listening" ? "idle" : state));
     };
     recognition.onerror = (event) => {
-      setVoiceError(`Voice input stopped: ${event.error}.`);
+      recognitionRef.current = null;
+      setVoiceError(recognitionErrorMessage(event.error));
       setListening(false);
       setInteractionState("idle");
     };
@@ -639,7 +877,14 @@ function RockyInteraction({
       void submitMessage(transcript);
     };
     recognitionRef.current = recognition;
-    recognition.start();
+    recordingStartingRef.current = false;
+    setMicStarting(false);
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setVoiceError("Voice input could not start. Please try again or keep typing.");
+    }
   };
 
   const stopListening = () => {
@@ -648,6 +893,7 @@ function RockyInteraction({
       return;
     }
     recognitionRef.current?.stop();
+    recognitionRef.current = null;
     setListening(false);
     setInteractionState("idle");
   };
@@ -662,43 +908,52 @@ function RockyInteraction({
 
       <form className="rocky-form" onSubmit={onSubmit}>
         <div className="rocky-input-shell">
-          <input
+          <textarea
             ref={inputRef}
             className="rocky-input"
+            rows={1}
             value={draft}
-            disabled={submitting}
-            onChange={(event) => setDraft(event.target.value)}
+            disabled={submitting || listening || micStarting}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              window.requestAnimationFrame(resizeComposer);
+            }}
+            onKeyDown={onComposerKeyDown}
             placeholder="Ask Rocky what changed, what matters today, or what to do next"
             aria-label="Ask Rocky what changed, what matters today, or what to do next"
             aria-describedby="rocky-status-detail"
           />
           <button
             className="rocky-action"
-            type={hasDraft ? "submit" : "button"}
-            disabled={submitting || (!hasDraft && !voiceSupported)}
+            type={!listening && hasDraft ? "submit" : "button"}
+            disabled={submitting || micStarting || (!hasDraft && !voiceSupported)}
             aria-label={
-              hasDraft
-                ? "Send message to Rocky"
-                : voiceSupported
-                  ? listening
-                    ? "Stop listening"
-                    : "Use microphone"
-                  : "Voice input is not available in this browser"
+              micStarting
+                ? "Starting microphone"
+                : listening
+                ? "Stop listening"
+                : hasDraft
+                  ? "Send message to Rocky"
+                  : voiceSupported
+                    ? "Use microphone"
+                    : "Voice input is not available in this browser"
             }
             aria-pressed={!hasDraft ? listening : undefined}
             title={
-              hasDraft
-                ? "Send"
-                : voiceSupported
-                  ? listening
-                    ? "Stop listening"
-                    : "Use microphone"
-                  : "Voice input is not available in this browser"
+              micStarting
+                ? "Starting microphone"
+                : listening
+                ? "Stop listening"
+                : hasDraft
+                  ? "Send"
+                  : voiceSupported
+                    ? "Use microphone"
+                    : "Voice input is not available in this browser"
             }
-            onClick={hasDraft ? undefined : listening ? stopListening : startListening}
+            onClick={listening ? stopListening : hasDraft ? undefined : startListening}
           >
-            {submitting || hasDraft || listening ? (
-              <span>{submitting ? "..." : hasDraft ? "Send" : "Stop"}</span>
+            {submitting || micStarting || hasDraft || listening ? (
+              <span>{submitting || micStarting ? "..." : listening ? "Stop" : "Send"}</span>
             ) : (
               <svg
                 className="rocky-mic-icon"
@@ -724,7 +979,7 @@ function RockyInteraction({
             Stop speaking
           </button>
         )}
-        {!voiceSupported && <span>Voice input is unavailable in this browser.</span>}
+        {!voiceSupported && <span>{voiceUnavailableMessage}</span>}
         {voiceError && <span className="err">{voiceError}</span>}
         {error && <span className="err">{error}</span>}
       </div>
@@ -739,7 +994,13 @@ function RockyInteraction({
             type="checkbox"
             checked={spokenOutput}
             onChange={(event) => {
+              spokenOutputRef.current = event.target.checked;
               setSpokenOutput(event.target.checked);
+              try {
+                window.localStorage.setItem(SPOKEN_OUTPUT_KEY, String(event.target.checked));
+              } catch {
+                /* preference persistence is best-effort */
+              }
               if (!event.target.checked) stopRockySpeech();
             }}
           />
@@ -753,11 +1014,24 @@ function RockyInteraction({
       </div>
 
       {response && (
-        <div className="rocky-latest" aria-live="polite">
+        <div className="rocky-latest" ref={latestResponseRef} aria-live="polite">
           <p className="rocky-latest-label">Rocky</p>
           <p className="rocky-latest-reply" aria-label="Rocky's latest response">
             {response.reply}
           </p>
+          {spokenOutput && (
+            <button
+              className="rocky-replay"
+              type="button"
+              disabled={interactionState === "speaking"}
+              onClick={() => {
+                unlockAudioPlayback();
+                void speak(response.reply);
+              }}
+            >
+              Replay
+            </button>
+          )}
         </div>
       )}
     </section>

@@ -527,7 +527,7 @@ body {
 
 .rocky-input-shell {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
   min-height: 58px;
   padding: 7px 8px 7px 22px;
@@ -556,7 +556,12 @@ body {
   color: var(--text);
   font: inherit;
   font-size: 15px;
-  padding: 0;
+  height: 24px;
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 2px 0;
+  line-height: 1.4;
+  resize: none;
 }
 
 .rocky-input::placeholder {
@@ -638,6 +643,7 @@ body {
 }
 
 .rocky-state-dot.listening,
+.rocky-state-dot.transcribing,
 .rocky-state-dot.thinking {
   background: var(--accent-hover);
   box-shadow: 0 0 16px rgba(118, 121, 245, 0.46);
@@ -737,6 +743,27 @@ body {
   line-height: 1.62;
   margin: 0;
 }
+
+.rocky-replay {
+  width: max-content;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.rocky-replay:hover:not(:disabled),
+.rocky-replay:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.rocky-replay:disabled { cursor: default; opacity: 0.55; }
 
 .ambient-section {
   width: min(100%, 700px);
@@ -2108,6 +2135,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
   cursor: pointer;
 }
 
+.pwa-update button:disabled { cursor: default; opacity: 0.55; }
+
 .pwa-update .pwa-update-dismiss {
   width: 36px;
   padding: 0;
@@ -2131,7 +2160,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .rocky-home { min-height: calc(100dvh - 56px); }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 767px), (max-height: 500px) and (max-width: 932px) {
   html, body, #root { min-height: 100%; height: auto; }
   body { overflow-x: clip; }
 
@@ -2297,6 +2326,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .rocky-options { justify-content: flex-start; margin-top: 0; }
   .rocky-audio-toggle { min-height: 44px; }
   .rocky-latest { width: 100%; }
+  .rocky-replay { min-height: 44px; }
 
   .mc-dashboard {
     grid-template-columns: minmax(0, 1fr);

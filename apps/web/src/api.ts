@@ -120,6 +120,7 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   auth?: boolean; // attach bearer + participate in refresh-on-401 (default true)
+  signal?: AbortSignal;
 }
 
 export interface BinaryResponse {
@@ -129,7 +130,7 @@ export interface BinaryResponse {
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, auth = true } = opts;
+  const { method = "GET", body, auth = true, signal } = opts;
   const isFormDataBody = typeof FormData !== "undefined" && body instanceof FormData;
 
   const doFetch = async (): Promise<Response> => {
@@ -147,6 +148,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
         : isFormDataBody
           ? body
           : JSON.stringify(body),
+      signal,
     });
   };
 
@@ -286,8 +288,9 @@ export const listActivity = (): Promise<Activity[]> => request<Activity[]>("/act
 
 export const sendConversation = (
   body: ConversationRequest,
+  signal?: AbortSignal,
 ): Promise<ConversationResponse> =>
-  request<ConversationResponse>("/conversation", { method: "POST", body });
+  request<ConversationResponse>("/conversation", { method: "POST", body, signal });
 
 export const synthesizeSpeech = (
   body: SpeechRequest,
@@ -298,10 +301,11 @@ export const synthesizeSpeech = (
 export const transcribeAudio = (
   audio: Blob,
   filename = "rocky-voice.webm",
+  signal?: AbortSignal,
 ): Promise<TranscriptionResponse> => {
   const body = new FormData();
   body.append("audio", audio, filename);
-  return request<TranscriptionResponse>("/transcribe", { method: "POST", body });
+  return request<TranscriptionResponse>("/transcribe", { method: "POST", body, signal });
 };
 
 // ---- Reminders ----------------------------------------------------------
