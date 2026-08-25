@@ -229,9 +229,31 @@ function RockyInteraction({
   }, []);
 
   useEffect(() => {
+    const stopVoiceForLifecycle = () => {
+      recognitionRef.current?.stop();
+      const recorder = mediaRecorderRef.current;
+      if (recorder?.state === "recording") {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.stop();
+      }
+      cleanupRecording();
+      stopRockySpeech();
+      setListening(false);
+      setInteractionState("idle");
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") stopVoiceForLifecycle();
+    };
+    window.addEventListener("pagehide", stopVoiceForLifecycle);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      window.removeEventListener("pagehide", stopVoiceForLifecycle);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       recognitionRef.current?.stop();
       if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.ondataavailable = null;
+        mediaRecorderRef.current.onstop = null;
         mediaRecorderRef.current.stop();
       }
       cleanupRecording();
