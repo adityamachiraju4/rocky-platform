@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.transcription.provider import TranscriptionProviderError
+from app.transcription.provider import TranscriptionProviderError, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class OpenAITranscriptionProvider:
 
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str
-    ) -> str:
+    ) -> TranscriptionResult:
         self.last_error_code = None
         try:
             response = await self._client.audio.transcriptions.create(
@@ -124,4 +124,8 @@ class OpenAITranscriptionProvider:
                 "OpenAI transcription response returned empty text.",
                 code=self.last_error_code,
             )
-        return text.strip()
+        language = getattr(response, "language", None)
+        return TranscriptionResult(
+            text=text.strip(),
+            language=language if isinstance(language, str) else None,
+        )

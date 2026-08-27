@@ -29,7 +29,7 @@ async def transcribe_audio(
     started = time.perf_counter()
     try:
         content = await audio.read(MAX_TRANSCRIPTION_AUDIO_BYTES + 1)
-        text = await service.transcribe(
+        result = await service.transcribe(
             content,
             filename=audio.filename or "audio",
             content_type=audio.content_type,
@@ -52,4 +52,8 @@ async def transcribe_audio(
             (time.perf_counter() - started) * 1000,
         )
 
-    return TranscriptionResponse(text=text)
+    return TranscriptionResponse(
+        text=result.text,
+        language=result.language,
+        language_probability=result.language_probability,
+    )

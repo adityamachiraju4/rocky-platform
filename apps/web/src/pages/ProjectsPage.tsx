@@ -40,6 +40,7 @@ export default function ProjectsPage() {
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
           placeholder="New project name"
+          aria-label="New project name"
         />
         <button className="btn-primary" onClick={submit} disabled={creating || !name.trim()}>
           {creating ? "Creating…" : "Create"}
@@ -51,7 +52,7 @@ export default function ProjectsPage() {
       {error && <p className="err" role="alert">{error}</p>}
       {data && data.length === 0 && <p className="muted">No projects yet.</p>}
 
-      <ul className="rows">
+      <ul className="rows project-rows">
         {data?.map((p) => (
           <li key={p.id} className="row">
             <Link to={`/projects/${p.id}`} className="row-main">

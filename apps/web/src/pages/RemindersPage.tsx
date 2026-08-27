@@ -71,15 +71,17 @@ export default function RemindersPage() {
           <span className="pill">{browserTimezone() ?? "Local time"}</span>
         </header>
 
-        <form className="surface-form" onSubmit={submit}>
-          <label className="field-label" htmlFor="reminder-title">Reminder</label>
-          <input
-            id="reminder-title"
-            className="input"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="What should Rocky remind you about?"
-          />
+        <form className="surface-form reminder-form" onSubmit={submit}>
+          <label className="field-label" htmlFor="reminder-title">
+            Reminder
+            <input
+              id="reminder-title"
+              className="input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="What should Rocky remind you about?"
+            />
+          </label>
           <div className="form-grid">
             <label className="field-label" htmlFor="reminder-notes">
               Notes

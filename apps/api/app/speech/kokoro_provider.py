@@ -29,8 +29,16 @@ class KokoroSpeechProvider:
         self._lock = threading.Lock()
         self.last_error_code: str | None = None
 
-    async def synthesize(self, text: str) -> SpeechAudio:
+    async def synthesize(
+        self, text: str, *, language: str = "en"
+    ) -> SpeechAudio:
         self.last_error_code = None
+        if _primary_language(language) != "en":
+            self.last_error_code = "unsupported_language"
+            raise SpeechProviderError(
+                "Kokoro language is not available in this installation.",
+                code=self.last_error_code,
+            )
         try:
             content = await asyncio.to_thread(self._synthesize_sync, text)
         except Exception as exc:  # noqa: BLE001 - provider fallback owns errors
@@ -128,3 +136,7 @@ def _voice_lang_code(voice: str) -> str:
         return "a"
     prefix = match.group(0)
     return prefix[0]
+
+
+def _primary_language(value: str) -> str:
+    return value.strip().lower().replace("_", "-").split("-", 1)[0] or "en"

@@ -27,6 +27,7 @@ from app.db.base import Base
 from app.main import app as fastapi_app
 from app.models.user import User
 from app.speech.dependencies import get_openai_speech_provider, get_speech_provider
+from app.speech.kokoro_provider import KokoroSpeechProvider
 from app.speech.openai_provider import OpenAISpeechProvider
 from app.speech.provider import (
     FallbackSpeechProvider,
@@ -44,9 +45,13 @@ class _FakeSpeechProvider:
     def __init__(self, result: SpeechAudio | Exception) -> None:
         self._result = result
         self.calls: list[str] = []
+        self.languages: list[str] = []
 
-    async def synthesize(self, text: str) -> SpeechAudio:
+    async def synthesize(
+        self, text: str, *, language: str = "en"
+    ) -> SpeechAudio:
         self.calls.append(text)
+        self.languages.append(language)
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -164,6 +169,7 @@ async def test_speech_generation_returns_audio(ctx) -> None:
     assert resp.content == b"mp3-bytes"
     assert resp.headers["content-type"] == "audio/mpeg"
     assert provider.calls == ["Yes. I can hear you."]
+    assert provider.languages == ["en"]
 
 
 @pytest.mark.asyncio
@@ -305,6 +311,50 @@ async def test_provider_priority_falls_back_to_openai() -> None:
     assert audio.content == b"openai"
     assert local.calls == ["Hello"]
     assert openai.calls == ["Hello"]
+
+
+@pytest.mark.asyncio
+async def test_non_english_skips_english_kokoro_and_uses_external_tts() -> None:
+    local = KokoroSpeechProvider(voice="am_adam", speed=0.95)
+    openai = _FakeSpeechProvider(
+        SpeechAudio(content=b"telugu", media_type="audio/mpeg")
+    )
+    provider = FallbackSpeechProvider((('kokoro', local), ('openai', openai)))
+
+    audio = await provider.synthesize("మీ పనులు", language="te")
+
+    assert audio.content == b"telugu"
+    assert audio.provider == "openai"
+    assert openai.languages == ["te"]
+    assert local._pipeline is None
+
+
+@pytest.mark.asyncio
+async def test_tamil_skips_english_kokoro_and_uses_external_tts() -> None:
+    local = KokoroSpeechProvider(voice="am_adam", speed=0.95)
+    openai = _FakeSpeechProvider(
+        SpeechAudio(content=b"tamil", media_type="audio/mpeg")
+    )
+    provider = FallbackSpeechProvider((("kokoro", local), ("openai", openai)))
+
+    audio = await provider.synthesize("உங்கள் பணிகள்", language="ta")
+
+    assert audio.content == b"tamil"
+    assert audio.provider == "openai"
+    assert openai.languages == ["ta"]
+    assert local._pipeline is None
+
+
+@pytest.mark.asyncio
+async def test_unsupported_local_language_is_available_for_browser_fallback() -> None:
+    local = KokoroSpeechProvider(voice="am_adam", speed=0.95)
+    provider = FallbackSpeechProvider((("kokoro", local),))
+
+    with pytest.raises(SpeechProviderError) as excinfo:
+        await provider.synthesize("வணக்கம்", language="ta")
+
+    assert excinfo.value.code == "unsupported_language"
+    assert local._pipeline is None
 
 
 @pytest.mark.asyncio

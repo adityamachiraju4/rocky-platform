@@ -127,7 +127,7 @@ class Responder(Protocol):
     """Renders an Outcome into a reply string. Reads facts, returns words.
     Holds no execution authority."""
 
-    def render(self, outcome: Outcome) -> str: ...
+    def render(self, outcome: Outcome, *, language: str = "en") -> str: ...
 
 
 def _quoted(value: str | None) -> str:
@@ -171,12 +171,72 @@ def _recall_phrase(fact: RecallFact) -> str:
     return "recorded activity"
 
 
+def _localized_capability_reply(
+    outcome: Outcome, language: str
+) -> str | None:
+    if language == "en":
+        return None
+
+    if outcome.kind == "task_list":
+        titles = ", ".join(_quoted(title) for title in outcome.task_titles)
+        if outcome.task_titles:
+            templates = {
+                "hi": "आपके {count} सक्रिय काम हैं: {titles}।",
+                "te": "మీకు {count} యాక్టివ్ పనులు ఉన్నాయి: {titles}.",
+                "ta": "உங்களுக்கு {count} செயலில் உள்ள வேலைகள் உள்ளன: {titles}.",
+                "es": "Tienes {count} tareas activas: {titles}.",
+                "fr": "Vous avez {count} tâches actives : {titles}.",
+                "ja": "進行中のタスクは{count}件です: {titles}。",
+            }
+            template = templates.get(language)
+            if template:
+                return template.format(count=len(outcome.task_titles), titles=titles)
+        empty = {
+            "hi": "अभी आपका कोई सक्रिय काम नहीं है।",
+            "te": "ప్రస్తుతం మీకు యాక్టివ్ పనులు లేవు.",
+            "ta": "இப்போது உங்களிடம் செயலில் உள்ள வேலைகள் இல்லை.",
+            "es": "No tienes tareas activas ahora mismo.",
+            "fr": "Vous n'avez aucune tâche active pour le moment.",
+            "ja": "現在、進行中のタスクはありません。",
+        }
+        return empty.get(language)
+
+    if outcome.kind == "project_list":
+        names = ", ".join(outcome.project_names)
+        if outcome.project_names:
+            templates = {
+                "hi": "आपके {count} प्रोजेक्ट हैं: {names}।",
+                "te": "మీకు {count} ప్రాజెక్టులు ఉన్నాయి: {names}.",
+                "ta": "உங்களிடம் {count} திட்டங்கள் உள்ளன: {names}.",
+                "es": "Tienes {count} proyectos: {names}.",
+                "fr": "Vous avez {count} projets : {names}.",
+                "ja": "プロジェクトは{count}件です: {names}。",
+            }
+            template = templates.get(language)
+            if template:
+                return template.format(count=len(outcome.project_names), names=names)
+        empty = {
+            "hi": "अभी आपका कोई प्रोजेक्ट नहीं है।",
+            "te": "ప్రస్తుతం మీకు ప్రాజెక్టులు లేవు.",
+            "ta": "இப்போது உங்களிடம் திட்டங்கள் இல்லை.",
+            "es": "Todavía no tienes proyectos.",
+            "fr": "Vous n'avez pas encore de projets.",
+            "ja": "まだプロジェクトはありません。",
+        }
+        return empty.get(language)
+
+    return None
+
+
 class TemplateResponder:
     """Deterministic, grounded renderer. Says exactly what the Outcome holds;
     interprets nothing. Throwaway once LlmResponder lands behind the Protocol.
     """
 
-    def render(self, outcome: Outcome) -> str:
+    def render(self, outcome: Outcome, *, language: str = "en") -> str:
+        localized = _localized_capability_reply(outcome, language)
+        if localized is not None:
+            return localized
         if outcome.kind == "project_list":
             if not outcome.project_names:
                 return "You have no projects yet."
@@ -342,6 +402,8 @@ class TemplateResponder:
             )
 
         if outcome.kind == "ambiguous":
+            if outcome.reply:
+                return outcome.reply
             listed = "\n".join(f"- {c}" for c in outcome.candidates)
             return f"I found several matches:\n{listed}\nWhich one?"
 

@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from "react";
+import { useCallback, useRef, useState, type FormEvent } from "react";
 import AppShell from "../AppShell";
 import { createNote, listNotes, updateNote } from "../api";
 import { relativeTime } from "../format";
@@ -17,9 +17,19 @@ export default function NotesPage() {
   const [creatingTitle, setCreatingTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const editorRef = useRef<HTMLElement | null>(null);
 
   const notes = data ?? [];
   const selected = notes.find((note) => note.id === selectedId) ?? null;
+
+  const selectNote = (note: Note) => {
+    setSelectedId(note.id);
+    setDraftTitle(note.title);
+    setDraftContent(note.content);
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
+    }
+  };
 
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -31,9 +41,7 @@ export default function NotesPage() {
       const note = await createNote({ title });
       setCreatingTitle("");
       setFilter("active");
-      setSelectedId(note.id);
-      setDraftTitle(note.title);
-      setDraftContent(note.content);
+      selectNote(note);
       reload();
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : "Note could not be created.");
@@ -119,11 +127,7 @@ export default function NotesPage() {
                     <li key={note.id}>
                       <button
                         className={selected?.id === note.id ? "select-row active" : "select-row"}
-                        onClick={() => {
-                          setSelectedId(note.id);
-                          setDraftTitle(note.title);
-                          setDraftContent(note.content);
-                        }}
+                        onClick={() => selectNote(note)}
                       >
                         <strong>{note.title}</strong>
                         <span>{relativeTime(note.updated_at)}</span>
@@ -134,7 +138,7 @@ export default function NotesPage() {
               )}
             </section>
 
-            <section className="mc-panel editor-panel">
+            <section className="mc-panel editor-panel" ref={editorRef}>
               {selected ? (
                 <>
                   <label className="field-label" htmlFor="note-title">Title</label>

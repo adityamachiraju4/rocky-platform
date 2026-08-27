@@ -64,6 +64,8 @@ class UnderstandingProvider(Protocol):
         message: str,
         world: WorldView,
         context: dict[str, Any] | None = None,
+        include_personal_context: bool = True,
+        response_language: str = "en",
     ) -> UnderstandingResult: ...
 
 

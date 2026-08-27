@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.transcription.provider import (
     TranscriptionProvider,
     TranscriptionProviderError,
+    TranscriptionResult,
 )
 
 MAX_TRANSCRIPTION_AUDIO_BYTES = 12 * 1024 * 1024
@@ -37,7 +38,7 @@ class TranscriptionService:
 
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str | None
-    ) -> str:
+    ) -> TranscriptionResult:
         media_type = (content_type or "").split(";")[0].strip().lower()
         if not audio:
             raise TranscriptionInputError("Audio upload is empty.")
@@ -50,7 +51,7 @@ class TranscriptionService:
                 "Transcription provider is unavailable."
             )
         try:
-            text = await self._provider.transcribe(
+            result = await self._provider.transcribe(
                 audio,
                 filename=filename or "audio",
                 content_type=media_type,
@@ -59,6 +60,12 @@ class TranscriptionService:
             raise TranscriptionUnavailableError(
                 "Transcription provider failed."
             ) from exc
-        if not text.strip():
+        if isinstance(result, str):
+            result = TranscriptionResult(text=result)
+        if not result.text.strip():
             raise TranscriptionUnavailableError("Transcription was empty.")
-        return text.strip()
+        return TranscriptionResult(
+            text=result.text.strip(),
+            language=result.language,
+            language_probability=result.language_probability,
+        )

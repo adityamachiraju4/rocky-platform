@@ -36,6 +36,7 @@ async def converse(
             current_user,
             payload.message,
             timezone_name=payload.timezone,
+            language=payload.language,
         )
     except UnknownActionError as exc:
         # The resolver proposed something outside the closed registry. This is

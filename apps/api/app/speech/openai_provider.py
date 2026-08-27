@@ -40,14 +40,19 @@ class OpenAISpeechProvider:
         self._speed = speed
         self.last_error_code: str | None = None
 
-    async def synthesize(self, text: str) -> SpeechAudio:
+    async def synthesize(
+        self, text: str, *, language: str = "en"
+    ) -> SpeechAudio:
         self.last_error_code = None
         try:
             response = await self._client.audio.speech.create(
                 model=self._model,
                 voice=self._voice,
                 input=text,
-                instructions=ROCKY_VOICE_INSTRUCTIONS,
+                instructions=(
+                    f"{ROCKY_VOICE_INSTRUCTIONS} Speak in language code "
+                    f"{language}."
+                ),
                 response_format="mp3",
                 speed=self._speed,
             )

@@ -102,7 +102,6 @@ export default function LoginPage() {
               onClick={() => setShowPassword((v) => !v)}
               aria-label={showPassword ? "Hide password" : "Show password"}
               aria-pressed={showPassword}
-              tabIndex={-1}
             >
               {showPassword ? (
                 <svg viewBox="0 0 24 24" aria-hidden="true">

@@ -21,6 +21,7 @@ Honest non-execution: a no-match or ambiguous reference returns
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,6 +55,7 @@ from app.lists.service import ListsService
 from app.conversation import registry
 from app.conversation.context import (
     ConversationContextStore,
+    GeneralConversationTurn,
     GroundedProjectReference,
     GroundedTaskReference,
 )
@@ -62,6 +64,13 @@ from app.conversation.exceptions import (
     CompletionTargetNotFoundError,
     NoMatchError,
     UnknownActionError,
+)
+from app.conversation.language import (
+    is_general_follow_up,
+    live_information_category,
+    live_information_reply,
+    normalize_capability_message,
+    response_language,
 )
 from app.conversation.resolver import (
     HardcodedResolver,
@@ -93,6 +102,54 @@ from app.conversation.understanding import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PERSONAL_CONTEXT_PATTERN = re.compile(
+    r"\b(my|mine|task|project|reminder|notification|note|list|rocky task|"
+    r"finish|complete|create|add|archive|dismiss|remind me|tasks|tareas|tâches|"
+    r"naa|naaku|enti|cheyyi)\b|काम|कार्य|పనులు|வேலைகள்|タスク",
+    re.IGNORECASE,
+)
+_LIVE_INFORMATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "weather",
+        re.compile(
+            r"\b(?:what(?:'s| is) the weather|weather (?:today|now|tomorrow|"
+            r"this week|in\b)|forecast (?:for|today|tomorrow))",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "news",
+        re.compile(
+            r"\b(?:latest|current|today(?:'s)?)\s+news\b|\bnews today\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "prices",
+        re.compile(
+            r"\b(?:current|latest|today(?:'s)?)\s+"
+            r"(?:price|stock price|exchange rate)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "sports scores",
+        re.compile(
+            r"\b(?:live|latest|current|today(?:'s)?)\s+"
+            r"(?:score|scores|standings)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "traffic",
+        re.compile(
+            r"\b(?:traffic|travel time)\b.*\b(?:now|today|current)\b|"
+            r"\b(?:current|live)\s+traffic\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 def _target_type_for_action(
@@ -232,7 +289,10 @@ class ConversationService:
         current_user: User,
         message: str,
         timezone_name: str | None = None,
+        language: str | None = None,
     ) -> ConversationResponse:
+        turn_language = response_language(message, language)
+        resolver_message = normalize_capability_message(message)
         world_started = time.perf_counter()
         world = await self._build_world(current_user)
         logger.info(
@@ -243,22 +303,39 @@ class ConversationService:
         # Resolver proposes; it executes nothing. Deterministic handling stays
         # first so obvious/offline cases never depend on a model provider.
         try:
-            action = self._resolver.resolve(message, world)
+            action = self._resolver.resolve(resolver_message, world)
         except NoMatchError:
+            live_category = (
+                live_information_category(message)
+                or self._live_information_category(message)
+            )
+            if live_category is not None:
+                return self._respond(
+                    Outcome(
+                        kind="conversation",
+                        executed=False,
+                        reply=live_information_reply(
+                            live_category, turn_language
+                        ),
+                    ),
+                    turn_language,
+                )
             outcome = await self._try_provider(
                 current_user,
                 message,
                 world,
                 timezone_name,
+                turn_language,
                 fallback=Outcome(kind="no_match", executed=False),
             )
-            return self._respond(outcome)
+            return self._respond(outcome, turn_language)
         except CompletionTargetNotFoundError as exc:
             outcome = await self._try_provider(
                 current_user,
                 message,
                 world,
                 timezone_name,
+                turn_language,
                 fallback=Outcome(
                     kind="target_not_found",
                     executed=False,
@@ -278,14 +355,15 @@ class ConversationService:
                     ),
                 ),
             )
-            return self._respond(outcome)
+            return self._respond(outcome, turn_language)
         except AmbiguousReferenceError as exc:
             return self._respond(
                 Outcome(
                     kind="ambiguous",
                     executed=False,
                     candidates=tuple(exc.candidates),
-                )
+                ),
+                turn_language,
             )
 
         # Trust boundary: the proposed action must be in the closed registry.
@@ -296,7 +374,7 @@ class ConversationService:
             current_user, action, world, timezone_name
         )
         self._remember_outcome(current_user, outcome)
-        return self._respond(outcome)
+        return self._respond(outcome, turn_language)
 
     async def _try_provider(
         self,
@@ -304,6 +382,7 @@ class ConversationService:
         message: str,
         world: WorldView,
         timezone_name: str | None,
+        response_language: str,
         fallback: Outcome,
     ) -> Outcome:
         if self._understanding_provider is None:
@@ -316,10 +395,17 @@ class ConversationService:
         )
         try:
             provider_started = time.perf_counter()
+            include_personal_context = self._needs_personal_context(message)
             result = await self._understanding_provider.understand(
                 message=message,
                 world=world,
-                context=self._context_payload(current_user),
+                context=self._context_payload(
+                    current_user,
+                    include_personal_context=include_personal_context,
+                    include_general_context=is_general_follow_up(message),
+                ),
+                include_personal_context=include_personal_context,
+                response_language=response_language,
             )
         except UnderstandingProviderError as exc:
             logger.warning(
@@ -337,6 +423,10 @@ class ConversationService:
             current_user, result, world, timezone_name
         )
         self._remember_outcome(current_user, outcome)
+        if isinstance(result, ConversationTurn) and result.reply:
+            self._remember_general_turn(
+                current_user, message, result.reply, response_language
+            )
         return outcome
 
     async def _outcome_from_understanding(
@@ -382,6 +472,7 @@ class ConversationService:
                 kind="ambiguous",
                 executed=False,
                 candidates=result.candidates,
+                reply=result.prompt,
             )
 
         if isinstance(result, Unsupported):
@@ -422,13 +513,16 @@ class ConversationService:
             current_user, action, world, timezone_name
         )
 
-    def _respond(self, outcome: Outcome) -> ConversationResponse:
+    def _respond(
+        self, outcome: Outcome, language: str = "en"
+    ) -> ConversationResponse:
         """Render an Outcome into the wire response. The reply string is
         the Responder's job; the service only carries executed/action."""
         return ConversationResponse(
             executed=outcome.executed,
             action=outcome.action,
-            reply=self._responder.render(outcome),
+            reply=self._responder.render(outcome, language=language),
+            language=language,
         )
 
     # How far back "recently" reaches, and the most events recall will
@@ -1144,26 +1238,64 @@ class ConversationService:
             raise AmbiguousReferenceError([item.content for item in matches])
         raise CompletionTargetNotFoundError(target or "that list item")
 
-    def _context_payload(self, current_user: User) -> dict | None:
+    @staticmethod
+    def _needs_personal_context(message: str) -> bool:
+        return _PERSONAL_CONTEXT_PATTERN.search(message) is not None
+
+    @staticmethod
+    def _live_information_category(message: str) -> str | None:
+        for category, pattern in _LIVE_INFORMATION_PATTERNS:
+            if pattern.search(message):
+                return category
+        return None
+
+    def _context_payload(
+        self,
+        current_user: User,
+        *,
+        include_personal_context: bool = True,
+        include_general_context: bool = False,
+    ) -> dict | None:
         if self._context_store is None:
             return None
-        task_ref = self._context_store.get_last_task(current_user.id)
-        project_ref = self._context_store.get_last_project(current_user.id)
-        if task_ref is None and project_ref is None:
-            return None
         payload: dict = {}
-        if task_ref is not None:
-            payload["last_grounded_entity"] = {
-                "kind": "task",
-                "title": task_ref.title,
-                "project": task_ref.project_name,
-            }
-        if project_ref is not None:
-            payload["last_grounded_project"] = {
-                "kind": "project",
-                "name": project_ref.name,
-            }
-        return payload
+        if include_personal_context:
+            task_ref = self._context_store.get_last_task(current_user.id)
+            project_ref = self._context_store.get_last_project(current_user.id)
+            if task_ref is not None:
+                payload["last_grounded_entity"] = {
+                    "kind": "task",
+                    "title": task_ref.title,
+                    "project": task_ref.project_name,
+                }
+            if project_ref is not None:
+                payload["last_grounded_project"] = {
+                    "kind": "project",
+                    "name": project_ref.name,
+                }
+        elif include_general_context:
+            turn = self._context_store.get_last_general_turn(current_user.id)
+            if turn is not None:
+                payload["previous_general_turn"] = {
+                    "message": turn.message,
+                    "reply": turn.reply,
+                    "language": turn.language,
+                }
+        return payload or None
+
+    def _remember_general_turn(
+        self, current_user: User, message: str, reply: str, language: str
+    ) -> None:
+        if self._context_store is None:
+            return
+        self._context_store.set_last_general_turn(
+            current_user.id,
+            GeneralConversationTurn(
+                message=message[:2000],
+                reply=reply[:400],
+                language=language,
+            ),
+        )
 
     def _context_payload_user_task(self) -> GroundedTaskReference | None:
         # Set transiently by _outcome_from_understanding for the current turn.

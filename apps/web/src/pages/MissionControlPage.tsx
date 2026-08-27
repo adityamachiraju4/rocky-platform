@@ -6,6 +6,7 @@ import { useResource } from "../useApi";
 import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
 import { humanizeEvent } from "../activityLabels";
 import type { ConversationResponse, Reminder } from "../types";
+import { browserSpeechLanguage } from "../speechLanguage";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -389,10 +390,11 @@ function RockyInteraction({
     };
   }, [interactionState, micStarting, submitting]);
 
-  const speakBrowser = (reply: string, speechId: number) => {
+  const speakBrowser = (reply: string, language: string, speechId: number) => {
     if (!speechSupported) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(reply);
+    utterance.lang = browserSpeechLanguage(language);
     utterance.onend = () => {
       if (speechIdRef.current === speechId) {
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
@@ -479,7 +481,7 @@ function RockyInteraction({
     });
   };
 
-  const speak = async (reply: string) => {
+  const speak = async (reply: string, language: string) => {
     if (!spokenOutputRef.current || !lifecycleActiveRef.current) return;
     stopRockySpeech();
     const speechId = speechIdRef.current;
@@ -494,7 +496,7 @@ function RockyInteraction({
     const speechStartedAt = performance.now();
     speechDebug("speech request started");
     try {
-      const response = await synthesizeSpeech({ text: reply }, controller.signal);
+      const response = await synthesizeSpeech({ text: reply, language }, controller.signal);
       if (controller.signal.aborted || speechIdRef.current !== speechId) return;
       speechDebug("speech response", {
         elapsedMs: Math.round(performance.now() - speechStartedAt),
@@ -517,7 +519,7 @@ function RockyInteraction({
       });
       stopRockySpeech();
       const browserSpeechId = speechIdRef.current;
-      speakBrowser(reply, browserSpeechId);
+      speakBrowser(reply, language, browserSpeechId);
       if (speechSupported) {
         setVoiceError(
           e instanceof ApiError
@@ -563,6 +565,7 @@ function RockyInteraction({
     text: string,
     id: number,
     controller: AbortController,
+    language?: string | null,
   ) => {
     setInteractionState("thinking");
     const conversationStartedAt = performance.now();
@@ -571,6 +574,7 @@ function RockyInteraction({
       const result = await sendConversation({
         message: text,
         timezone: browserTimezone(),
+        language,
       }, controller.signal);
       if (!isCurrentTurn(id, controller)) return;
       speechDebug("conversation response", {
@@ -588,7 +592,7 @@ function RockyInteraction({
       }
       if (result.executed) onMutatingAction();
       finishTurn(id, controller);
-      void speak(result.reply);
+      void speak(result.reply, result.language);
     } catch (e: unknown) {
       if (!isCurrentTurn(id, controller)) return;
       if (e instanceof AuthExpiredError) {
@@ -636,7 +640,7 @@ function RockyInteraction({
         setInteractionState("idle");
         return;
       }
-      await runConversation(text, turn.id, turn.controller);
+      await runConversation(text, turn.id, turn.controller, result.language);
     } catch (e: unknown) {
       if (!isCurrentTurn(turn.id, turn.controller)) return;
       if (e instanceof AuthExpiredError) {
@@ -851,7 +855,7 @@ function RockyInteraction({
     }
 
     const recognition = new Recognition();
-    recognition.lang = "en-US";
+    recognition.lang = navigator.language || "en-US";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
     recognition.onstart = () => {
@@ -922,8 +926,8 @@ function RockyInteraction({
               window.requestAnimationFrame(resizeComposer);
             }}
             onKeyDown={onComposerKeyDown}
-            placeholder="Ask Rocky what changed, what matters today, or what to do next"
-            aria-label="Ask Rocky what changed, what matters today, or what to do next"
+            placeholder="Ask Rocky anything, or tell it what to do"
+            aria-label="Ask Rocky anything, or tell it what to do"
             aria-describedby="rocky-status-detail"
           />
           <button
@@ -1029,7 +1033,7 @@ function RockyInteraction({
               disabled={interactionState === "speaking"}
               onClick={() => {
                 unlockAudioPlayback();
-                void speak(response.reply);
+                void speak(response.reply, response.language);
               }}
             >
               Replay

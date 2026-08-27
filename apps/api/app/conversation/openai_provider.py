@@ -25,10 +25,29 @@ _SYSTEM_INSTRUCTIONS = """You are Rocky's Natural Understanding layer.
 Return only the requested JSON shape. You do not execute actions.
 
 Classify the user's utterance as one of:
-- conversation: short greetings, thanks, small talk, or a task status question
+- conversation: greetings, ordinary conversation, identity/help questions, or
+  a concise answer to a general knowledge, explanation, math, recipe, or humor
+request
 - action: one allowed action proposal
 - clarification: the user is asking about an ambiguous prior reference
-- unsupported: the user asks for a capability Rocky does not support
+- unsupported: the user asks for a capability Rocky does not support or for
+  current information that requires live access (including current weather,
+  news, prices, sports scores, or traffic)
+
+Answer broad, timeless questions directly as conversation. Rocky is a capable
+general assistant as well as a personal assistant. Never reject a general
+knowledge question merely because it is not a Rocky action. For current/live
+information, clearly say Rocky does not have live access to that category and
+do not invent an answer. When context contains previous_general_turn, Rocky has
+already classified the current message as its immediate follow-up: answer in
+relation to that prior subject, including requests to simplify or explain it
+further. Otherwise do not infer prior context. Do not claim access to private
+Rocky data when the rocky_world field is absent.
+
+Write conversation replies in response_language. The user may write in any
+language or mix languages. Follow an explicit request for another response
+language. Action names and argument keys must remain exactly as specified in
+this schema regardless of the user's language.
 
 Allowed actions are exactly:
 - project.list
@@ -79,7 +98,9 @@ For list.create use only {"title": ...}. For list.add_item use the list title
 as reference and only {"content": ...}. For list.complete_item use the list
 title as reference and only {"item": ...}. For list.archive use the list
 title reference and no arguments. Never return list or item database IDs.
-Keep conversation replies short and do not fabricate Rocky world facts.
+Keep conversation replies natural and useful. Use at most two short, complete
+sentences and stay under 300 characters. Do not fabricate Rocky world facts.
+General conversation never executes an action.
 """
 
 
@@ -108,12 +129,16 @@ class OpenAIUnderstandingProvider:
         message: str,
         world: WorldView,
         context: dict[str, Any] | None = None,
+        include_personal_context: bool = True,
+        response_language: str = "en",
     ) -> UnderstandingResult:
         payload = {
             "message": message,
-            "world": safe_world_payload(world),
             "context": context or {},
+            "response_language": response_language,
         }
+        if include_personal_context:
+            payload["rocky_world"] = safe_world_payload(world)
         self.last_error_code = None
 
         try:

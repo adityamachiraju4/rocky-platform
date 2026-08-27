@@ -62,7 +62,7 @@ export default function ProjectDetailPage() {
 
   return (
     <AppShell>
-      <header className="page-head">
+      <header className="page-head project-detail-head">
         <Link to="/projects" className="back">← Projects</Link>
         {project.data && (
           <EditableTitle value={project.data.name} onSave={renameProject} />
@@ -113,8 +113,15 @@ function EditableTitle({ value, onSave }: { value: string; onSave: (v: string) =
 
   if (!editing) {
     return (
-      <h1 className="editable" onClick={() => { setDraft(value); setEditing(true); }}>
-        {value}
+      <h1 className="editable">
+        <button
+          type="button"
+          className="editable-title-button"
+          onClick={() => { setDraft(value); setEditing(true); }}
+          aria-label={`Rename project ${value}`}
+        >
+          {value}
+        </button>
       </h1>
     );
   }

@@ -1,7 +1,15 @@
 """Provider boundary for speech-to-text transcription."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    text: str
+    language: str | None = None
+    language_probability: float | None = None
 
 
 class TranscriptionProviderError(RuntimeError):
@@ -15,4 +23,4 @@ class TranscriptionProviderError(RuntimeError):
 class TranscriptionProvider(Protocol):
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str
-    ) -> str: ...
+    ) -> TranscriptionResult: ...

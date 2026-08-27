@@ -25,7 +25,7 @@ async def synthesize_speech(
 ) -> Response:
     started = time.perf_counter()
     try:
-        audio = await service.synthesize(payload.text)
+        audio = await service.synthesize(payload.text, language=payload.language)
     except SpeechUnavailableError as exc:
         logger.warning("Speech synthesis unavailable")
         raise HTTPException(
@@ -38,4 +38,13 @@ async def synthesize_speech(
             (time.perf_counter() - started) * 1000,
         )
 
-    return Response(content=audio.content, media_type=audio.media_type)
+    headers = (
+        {"X-Rocky-Speech-Provider": audio.provider}
+        if audio.provider is not None
+        else None
+    )
+    return Response(
+        content=audio.content,
+        media_type=audio.media_type,
+        headers=headers,
+    )

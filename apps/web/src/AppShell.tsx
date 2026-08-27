@@ -41,7 +41,9 @@ function NavIcon({ name }: { name: IconName }) {
 function pageTitle(pathname: string): string {
   if (pathname === "/") return "Mission Control";
   if (pathname.startsWith("/projects/")) return "Project";
-  return navigation.find((item) => pathname.startsWith(item.to))?.label
+  return navigation.find(
+    (item) => item.to !== "/" && pathname.startsWith(item.to),
+  )?.label
     ?? (pathname.startsWith("/notifications") ? "Notifications" : "Rocky");
 }
 

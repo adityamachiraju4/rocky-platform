@@ -51,6 +51,7 @@ class ConversationRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=2000)
     timezone: str | None = Field(default=None, max_length=128)
+    language: str | None = Field(default=None, min_length=2, max_length=35)
 
 
 class ConversationResponse(BaseModel):
@@ -65,3 +66,4 @@ class ConversationResponse(BaseModel):
     executed: bool
     action: str | None = None
     reply: str
+    language: str = Field(min_length=2, max_length=35)

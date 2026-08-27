@@ -8,6 +8,7 @@ MAX_SPEECH_TEXT_CHARS = 1200
 
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_SPEECH_TEXT_CHARS)
+    language: str = Field(default="en", min_length=2, max_length=35)
 
     @field_validator("text")
     @classmethod

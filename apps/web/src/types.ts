@@ -79,20 +79,25 @@ export interface Activity {
 export interface ConversationRequest {
   message: string;
   timezone?: string | null;
+  language?: string | null;
 }
 
 export interface ConversationResponse {
   executed: boolean;
   action: string | null;
   reply: string;
+  language: string;
 }
 
 export interface SpeechRequest {
   text: string;
+  language?: string;
 }
 
 export interface TranscriptionResponse {
   text: string;
+  language: string | null;
+  language_probability: number | null;
 }
 
 export interface UserProfile {

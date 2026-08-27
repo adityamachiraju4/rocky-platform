@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from app.transcription.provider import TranscriptionProviderError
+from app.transcription.provider import TranscriptionProviderError, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ _EXTENSIONS_BY_MEDIA_TYPE = {
     "audio/aac": ".aac",
     "audio/m4a": ".m4a",
 }
+
+_ENGLISH_FALLBACK_LANGUAGES = frozenset(
+    {"ca", "de", "es", "fr", "it", "nl", "pt"}
+)
+_LOW_LANGUAGE_CONFIDENCE = 0.65
+_ENGLISH_SCORE_TOLERANCE = 0.15
 
 
 def extension_for_content_type(content_type: str) -> str:
@@ -73,7 +79,7 @@ class LocalWhisperTranscriptionProvider:
 
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str
-    ) -> str:
+    ) -> TranscriptionResult:
         suffix = extension_for_content_type(content_type)
         path: Path | None = None
         try:
@@ -132,14 +138,41 @@ class LocalWhisperTranscriptionProvider:
             extra={"transcription_provider": "local_whisper"},
         )
 
-    def _transcribe_file(self, path: Path) -> str:
+    def _transcribe_file(self, path: Path) -> TranscriptionResult:
         model = self._get_model()
         started = time.perf_counter()
-        segments, _info = model.transcribe(
+        configured_language = (
+            None if self._language.strip().lower() == "auto" else self._language
+        )
+        segments, info = model.transcribe(
             str(path),
-            language=self._language,
+            language=configured_language,
             task="transcribe",
         )
+        segments = list(segments)
+        detected_language = getattr(info, "language", None) or configured_language
+        language_probability = getattr(info, "language_probability", None)
+
+        if self._should_try_english_fallback(
+            configured_language,
+            detected_language,
+            language_probability,
+        ):
+            english_segments, english_info = model.transcribe(
+                str(path),
+                language="en",
+                task="transcribe",
+            )
+            english_segments = list(english_segments)
+            if self._average_log_probability(english_segments) >= (
+                self._average_log_probability(segments) - _ENGLISH_SCORE_TOLERANCE
+            ):
+                segments = english_segments
+                detected_language = "en"
+                language_probability = getattr(
+                    english_info, "language_probability", None
+                )
+
         text = "".join(segment.text for segment in segments).strip()
         logger.info(
             "Local Whisper inference complete: elapsed_ms=%.1f model=%s",
@@ -152,7 +185,37 @@ class LocalWhisperTranscriptionProvider:
                 "Local Whisper transcription returned empty text.",
                 code="empty_transcription",
             )
-        return text
+        return TranscriptionResult(
+            text=text,
+            language=detected_language,
+            language_probability=(
+                float(language_probability)
+                if isinstance(language_probability, (float, int))
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _should_try_english_fallback(
+        configured_language: str | None,
+        detected_language: str | None,
+        language_probability: object,
+    ) -> bool:
+        return (
+            configured_language is None
+            and detected_language in _ENGLISH_FALLBACK_LANGUAGES
+            and isinstance(language_probability, (float, int))
+            and language_probability < _LOW_LANGUAGE_CONFIDENCE
+        )
+
+    @staticmethod
+    def _average_log_probability(segments: list[Any]) -> float:
+        scores = [
+            float(segment.avg_logprob)
+            for segment in segments
+            if isinstance(getattr(segment, "avg_logprob", None), (float, int))
+        ]
+        return sum(scores) / len(scores) if scores else float("-inf")
 
     def _get_model(self) -> Any:
         with self._model_lock:

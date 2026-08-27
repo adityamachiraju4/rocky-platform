@@ -1,7 +1,7 @@
 """Provider boundary for speech rendering."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import Protocol
 
@@ -20,21 +20,26 @@ class SpeechProviderError(RuntimeError):
 class SpeechAudio:
     content: bytes
     media_type: str
+    provider: str | None = None
 
 
 class SpeechProvider(Protocol):
-    async def synthesize(self, text: str) -> SpeechAudio: ...
+    async def synthesize(
+        self, text: str, *, language: str = "en"
+    ) -> SpeechAudio: ...
 
 
 class FallbackSpeechProvider:
     def __init__(self, providers: tuple[tuple[str, SpeechProvider], ...]) -> None:
         self._providers = providers
 
-    async def synthesize(self, text: str) -> SpeechAudio:
+    async def synthesize(
+        self, text: str, *, language: str = "en"
+    ) -> SpeechAudio:
         last_error: SpeechProviderError | None = None
         for name, provider in self._providers:
             try:
-                audio = await provider.synthesize(text)
+                audio = await provider.synthesize(text, language=language)
             except SpeechProviderError as exc:
                 last_error = exc
                 logger.warning(
@@ -49,7 +54,7 @@ class FallbackSpeechProvider:
                 "Speech provider succeeded",
                 extra={"speech_provider": name},
             )
-            return audio
+            return replace(audio, provider=name)
 
         raise SpeechProviderError(
             "No speech provider could render audio.",

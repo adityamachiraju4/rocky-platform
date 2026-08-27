@@ -34,9 +34,9 @@ export default function ActivityPage() {
           const summary = summarizePayload(a.payload);
           return (
             <li key={a.id} className="ledger-row">
-              <span className="ledger-time mono">{formatTime(a.created_at)}</span>
               <span className="ledger-label">{humanizeEvent(a.event_type)}</span>
               {summary && <span className="ledger-summary mono">{summary}</span>}
+              <time className="ledger-time mono" dateTime={a.created_at}>{formatTime(a.created_at)}</time>
             </li>
           );
         })}

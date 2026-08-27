@@ -42,7 +42,7 @@ from app.transcription.openai_provider import (
     OpenAITranscriptionProvider,
     _openai_error_metadata,
 )
-from app.transcription.provider import TranscriptionProviderError
+from app.transcription.provider import TranscriptionProviderError, TranscriptionResult
 
 SECRET = "test-secret-key"
 PEPPER = "test-refresh-pepper"
@@ -50,13 +50,13 @@ PASSWORD = "correct horse battery"
 
 
 class _FakeTranscriptionProvider:
-    def __init__(self, result: str | Exception) -> None:
+    def __init__(self, result: str | TranscriptionResult | Exception) -> None:
         self._result = result
         self.calls: list[dict[str, object]] = []
 
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str
-    ) -> str:
+    ) -> str | TranscriptionResult:
         self.calls.append(
             {
                 "audio": audio,
@@ -70,7 +70,7 @@ class _FakeTranscriptionProvider:
 
 
 def _use_fake_provider(
-    result: str | Exception,
+    result: str | TranscriptionResult | Exception,
 ) -> _FakeTranscriptionProvider:
     provider = _FakeTranscriptionProvider(result)
     fastapi_app.dependency_overrides[get_transcription_provider] = (
@@ -180,7 +180,37 @@ async def test_transcription_success_returns_text(ctx) -> None:
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"text": "Create a project called Atlas"}
+    assert resp.json() == {
+        "text": "Create a project called Atlas",
+        "language": None,
+        "language_probability": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_transcription_returns_detected_language_metadata(ctx) -> None:
+    provider = _use_fake_provider(
+        TranscriptionResult(
+            text="నా పనులు ఏమిటి?",
+            language="te",
+            language_probability=0.94,
+        )
+    )
+    client, sessionmaker = ctx
+    headers = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/transcribe",
+        files={"audio": ("speech.webm", b"audio-bytes", "audio/webm")},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "text": "నా పనులు ఏమిటి?",
+        "language": "te",
+        "language_probability": 0.94,
+    }
     assert provider.calls == [
         {
             "audio": b"audio-bytes",
@@ -311,8 +341,8 @@ def test_transcription_provider_defaults_to_local() -> None:
     assert isinstance(provider, LocalWhisperTranscriptionProvider)
 
 
-def test_local_whisper_language_defaults_to_english() -> None:
-    assert settings.get_local_whisper_language() == "en"
+def test_local_whisper_language_defaults_to_auto() -> None:
+    assert settings.get_local_whisper_language() == "auto"
 
 
 def test_local_whisper_warmup_defaults_to_enabled() -> None:
@@ -419,8 +449,8 @@ async def test_local_whisper_provider_success_reuses_model_and_deletes_temp_file
         content_type="audio/mp4",
     )
 
-    assert first == "hello rocky"
-    assert second == "hello rocky"
+    assert first.text == "hello rocky"
+    assert second.text == "hello rocky"
     assert _WhisperModel.init_count == 1
     assert len(_WhisperModel.seen_paths) == 2
     assert _WhisperModel.seen_paths[0].suffix == ".webm"
@@ -463,7 +493,7 @@ async def test_local_whisper_warmup_loads_and_reuses_model(
         content_type="audio/webm",
     )
 
-    assert text == "hello rocky"
+    assert text.text == "hello rocky"
     assert _WhisperModel.init_count == 1
 
 
@@ -502,9 +532,140 @@ async def test_local_whisper_provider_passes_language_and_transcribe_task(
         content_type="audio/webm",
     )
 
-    assert text == "can you hear me"
+    assert text.text == "can you hear me"
+    assert text.language == "en"
     assert _WhisperModel.calls[0]["language"] == "en"
     assert _WhisperModel.calls[0]["task"] == "transcribe"
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_auto_propagates_detected_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Segment:
+        text = " డాకర్ అంటే ఏమిటి?"
+        avg_logprob = -0.2
+
+    class _WhisperModel:
+        calls: list[dict[str, object]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _path: str, **kwargs):
+            type(self).calls.append(kwargs)
+            return [_Segment()], SimpleNamespace(
+                language="te", language_probability=0.93
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    provider = LocalWhisperTranscriptionProvider(
+        model_name="small",
+        device="auto",
+        compute_type="auto",
+        language="auto",
+    )
+
+    result = await provider.transcribe(
+        b"audio", filename="speech.webm", content_type="audio/webm"
+    )
+
+    assert result.text == "డాకర్ అంటే ఏమిటి?"
+    assert result.language == "te"
+    assert result.language_probability == 0.93
+    assert _WhisperModel.calls == [{"language": None, "task": "transcribe"}]
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_auto_propagates_detected_tamil(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Segment:
+        text = " எனக்கு என்ன வேலைகள் உள்ளன?"
+        avg_logprob = -0.2
+
+    class _WhisperModel:
+        calls: list[dict[str, object]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _path: str, **kwargs):
+            type(self).calls.append(kwargs)
+            return [_Segment()], SimpleNamespace(
+                language="ta", language_probability=0.88
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    provider = LocalWhisperTranscriptionProvider(
+        model_name="small",
+        device="auto",
+        compute_type="auto",
+        language="auto",
+    )
+
+    result = await provider.transcribe(
+        b"audio", filename="speech.webm", content_type="audio/webm"
+    )
+
+    assert result.text == "எனக்கு என்ன வேலைகள் உள்ளன?"
+    assert result.language == "ta"
+    assert result.language_probability == 0.88
+    assert _WhisperModel.calls == [{"language": None, "task": "transcribe"}]
+
+
+@pytest.mark.asyncio
+async def test_local_whisper_auto_rechecks_low_confidence_latin_detection_as_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Segment:
+        def __init__(self, text: str, score: float) -> None:
+            self.text = text
+            self.avg_logprob = score
+
+    class _WhisperModel:
+        calls: list[dict[str, object]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _path: str, **kwargs):
+            type(self).calls.append(kwargs)
+            if kwargs["language"] is None:
+                return [_Segment(" Entendido.", -0.35)], SimpleNamespace(
+                    language="es", language_probability=0.42
+                )
+            return [_Segment(" Can you hear me?", -0.30)], SimpleNamespace(
+                language="en", language_probability=1.0
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    provider = LocalWhisperTranscriptionProvider(
+        model_name="small",
+        device="auto",
+        compute_type="auto",
+        language="auto",
+    )
+
+    result = await provider.transcribe(
+        b"audio", filename="speech.webm", content_type="audio/webm"
+    )
+
+    assert result.text == "Can you hear me?"
+    assert result.language == "en"
+    assert [call["language"] for call in _WhisperModel.calls] == [None, "en"]
 
 
 @pytest.mark.asyncio

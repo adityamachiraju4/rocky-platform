@@ -20,6 +20,7 @@ Conversation owns no state. These tests drive it two ways:
 """
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, time, timedelta, timezone
@@ -52,10 +53,12 @@ from app.conversation import registry
 from app.conversation.service import ConversationService
 from app.conversation.exceptions import UnknownActionError
 from app.conversation.dependencies import get_understanding_provider
-from app.conversation.resolver import Resolver, WorldView
+from app.conversation.openai_provider import OpenAIUnderstandingProvider
+from app.conversation.resolver import ProjectRef, Resolver, WorldView
 from app.conversation.schemas import ResolvedAction
 from app.conversation.understanding import (
     ActionProposal,
+    Clarification,
     ConversationTurn,
     UNDERSTANDING_JSON_SCHEMA,
     UnderstandingProviderError,
@@ -87,6 +90,38 @@ def _use_fake_provider(result: object | Exception) -> _FakeUnderstandingProvider
         lambda: provider
     )
     return provider
+
+
+class _FakeResponses:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        return type(
+            "Response",
+            (),
+            {
+                "output_text": json.dumps(
+                    {
+                        "kind": "conversation",
+                        "action": None,
+                        "reference": None,
+                        "arguments": None,
+                        "recall_window": None,
+                        "reply": "Tokyo is the capital of Japan.",
+                        "prompt": None,
+                        "candidates": None,
+                        "reason": None,
+                    }
+                )
+            },
+        )()
+
+
+class _FakeOpenAIClient:
+    def __init__(self) -> None:
+        self.responses = _FakeResponses()
 
 
 @pytest.fixture(autouse=True)
@@ -1177,6 +1212,515 @@ async def test_production_wiring_uses_provider_for_conversation_miss(
     assert body["reply"] == "Yes. I can hear you."
     assert len(provider.calls) == 1
     assert provider.calls[0]["message"] == "Hello can you hear me"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "reply_fragment"),
+    [
+        ("Hello", "Hello"),
+        ("Can you hear me?", "hear you"),
+        ("Who are you?", "Rocky"),
+        ("What can you do?", "tasks"),
+        ("Tell me a joke.", "debugging"),
+    ],
+)
+async def test_ordinary_conversation_uses_general_assistant_without_mutation(
+    ctx, message: str, reply_fragment: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply={
+                "Hello": "Hello. How can I help?",
+                "Can you hear me?": "Yes, I can hear you.",
+                "Who are you?": "I'm Rocky, your personal assistant.",
+                "What can you do?": "I can manage your tasks and answer questions.",
+                "Tell me a joke.": "Debugging: being the detective in a mystery you wrote.",
+            }[message],
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert reply_fragment.lower() in body["reply"].lower()
+    assert provider.calls[0]["include_personal_context"] is False
+    assert provider.calls[0]["context"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "reply_fragment"),
+    [
+        ("What is photosynthesis?", "sunlight"),
+        ("Explain Docker in simple terms.", "container"),
+        ("What is the capital of Japan?", "Tokyo"),
+    ],
+)
+async def test_general_knowledge_is_returned_as_a_normal_conversation(
+    ctx, message: str, reply_fragment: str
+) -> None:
+    replies = {
+        "What is photosynthesis?": "Plants use sunlight to turn water and carbon dioxide into food.",
+        "Explain Docker in simple terms.": "Docker packages software in portable containers.",
+        "What is the capital of Japan?": "The capital of Japan is Tokyo.",
+    }
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply=replies[message])
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {
+        "executed": False,
+        "action": None,
+        "reply": replies[message],
+        "language": "en",
+    }
+    assert reply_fragment.lower() in body["reply"].lower()
+    assert provider.calls[0]["include_personal_context"] is False
+
+
+@pytest.mark.asyncio
+async def test_openai_general_request_omits_rocky_world_payload() -> None:
+    provider = OpenAIUnderstandingProvider.__new__(OpenAIUnderstandingProvider)
+    provider._client = _FakeOpenAIClient()
+    provider._model = "test-model"
+    provider.last_error_code = None
+    world = WorldView(
+        projects=(ProjectRef(project_id=uuid.uuid4(), name="Private Project"),),
+        tasks=(),
+    )
+
+    result = await provider.understand(
+        message="What is the capital of Japan?",
+        world=world,
+        context=None,
+        include_personal_context=False,
+    )
+
+    assert isinstance(result, ConversationTurn)
+    call = provider._client.responses.calls[0]
+    user_input = call["input"][1]["content"][0]["text"]
+    payload = json.loads(user_input)
+    assert payload == {
+        "message": "What is the capital of Japan?",
+        "context": {},
+        "response_language": "en",
+    }
+
+
+@pytest.mark.asyncio
+async def test_general_follow_up_receives_only_one_bounded_general_turn(ctx) -> None:
+    first_provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Docker packages applications and dependencies into containers.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    first = await client.post(
+        "/conversation",
+        json={"message": "What is Docker?"},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    assert len(first_provider.calls) == 1
+
+    second_provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Containers share the host kernel, so they are lighter than VMs.",
+        )
+    )
+    second = await client.post(
+        "/conversation",
+        json={"message": "Why would I use it instead of a VM?"},
+        headers=headers,
+    )
+
+    assert second.status_code == 200, second.text
+    call = second_provider.calls[0]
+    assert call["include_personal_context"] is False
+    assert call["context"] == {
+        "previous_general_turn": {
+            "message": "What is Docker?",
+            "reply": "Docker packages applications and dependencies into containers.",
+            "language": "en",
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "language", "reply_fragment"),
+    [
+        ("मेरे काम क्या हैं?", "hi", "सक्रिय काम"),
+        ("నా పనులు ఏమిటి?", "te", "యాక్టివ్ పనులు"),
+        ("இன்று எனக்கு என்ன வேலைகள் உள்ளன?", "ta", "வேலைகள்"),
+        ("என் பணிகள் என்ன?", "ta", "வேலைகள்"),
+        ("¿Qué tareas tengo?", "es", "tareas activas"),
+        ("Quelles tâches ai-je aujourd'hui ?", "fr", "tâches actives"),
+        ("今日のタスクは何ですか？", "ja", "タスク"),
+        ("Rocky, naa tasks today enti?", "te", "యాక్టివ్ పనులు"),
+    ],
+)
+async def test_multilingual_task_queries_stay_deterministic_and_localized(
+    ctx, message: str, language: str, reply_fragment: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Provider must not run.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Rocky")
+    await _make_task(client, headers, project_id, title="Ship M3")
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is True
+    assert body["action"] == "task.list"
+    assert body["language"] == language
+    assert reply_fragment in body["reply"]
+    assert "Ship M3" in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "language", "reply"),
+    [
+        ("डॉकर क्या है?", "hi", "डॉकर कंटेनर में ऐप चलाने का तरीका है।"),
+        ("Docker అంటే ఏమిటి?", "te", "Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది."),
+        ("Docker என்றால் என்ன?", "ta", "Docker செயலிகளை கண்டெய்னர்களில் இயக்குகிறது."),
+        ("¿Qué es Docker?", "es", "Docker ejecuta aplicaciones en contenedores."),
+        ("Qu'est-ce que Docker ?", "fr", "Docker exécute des applications dans des conteneurs."),
+        ("Dockerとは何ですか？", "ja", "Dockerはアプリをコンテナで実行します。"),
+    ],
+)
+async def test_multilingual_general_questions_request_same_language_without_world(
+    ctx, message: str, language: str, reply: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply=reply)
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["language"] == language
+    assert body["reply"] == reply
+    call = provider.calls[0]
+    assert call["response_language"] == language
+    assert call["include_personal_context"] is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_response_language_overrides_input_language(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="डॉकर एक कंटेनर प्लेटफ़ॉर्म है।")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Docker ni Hindi mein explain karo."},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["language"] == "hi"
+    assert provider.calls[0]["response_language"] == "hi"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "language", "fragment"),
+    [
+        ("आज का मौसम क्या है?", "hi", "लाइव मौसम"),
+        ("హైదరాబాద్‌లో weather ఎలా ఉంది?", "te", "ప్రత్యక్ష వాతావరణ"),
+        ("இன்றைய வானிலை எப்படி இருக்கிறது?", "ta", "நேரடி வானிலை"),
+        ("¿Qué tiempo hace hoy?", "es", "tiempo real"),
+    ],
+)
+async def test_multilingual_live_data_refusal_is_local_and_same_language(
+    ctx, message: str, language: str, fragment: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Fabricated weather")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is False
+    assert body["language"] == language
+    assert fragment in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_multilingual_follow_up_carries_language_and_bounded_subject(ctx) -> None:
+    first_provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "Docker అంటే ఏమిటి?"},
+        headers=headers,
+    )
+    assert len(first_provider.calls) == 1
+
+    second_provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="ఇది యాప్ కోసం ఒక పెట్టె లాంటిది.")
+    )
+    response = await client.post(
+        "/conversation",
+        json={"message": "ఇంకా సింపుల్‌గా చెప్పు."},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    call = second_provider.calls[0]
+    assert call["response_language"] == "te"
+    assert call["context"] == {
+        "previous_general_turn": {
+            "message": "Docker అంటే ఏమిటి?",
+            "reply": "Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది.",
+            "language": "te",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_tamil_follow_up_carries_language_and_bounded_subject(ctx) -> None:
+    first_provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Docker செயலிகளை கண்டெய்னர்களில் இயக்குகிறது.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "Docker என்றால் என்ன?"},
+        headers=headers,
+    )
+    assert len(first_provider.calls) == 1
+
+    second_provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="இது செயலிக்கான ஒரு பெட்டி போன்றது.",
+        )
+    )
+    response = await client.post(
+        "/conversation",
+        json={"message": "இன்னும் எளிமையாக சொல்லு."},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    call = second_provider.calls[0]
+    assert call["response_language"] == "ta"
+    assert call["context"] == {
+        "previous_general_turn": {
+            "message": "Docker என்றால் என்ன?",
+            "reply": "Docker செயலிகளை கண்டெய்னர்களில் இயக்குகிறது.",
+            "language": "ta",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_multilingual_provider_clarification_preserves_localized_prompt(ctx) -> None:
+    _use_fake_provider(
+        Clarification(kind="clarification", prompt="ఏ పని గురించి అడుగుతున్నారు?")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "దాని గురించి చెప్పు", "language": "te"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "executed": False,
+        "action": None,
+        "reply": "ఏ పని గురించి అడుగుతున్నారు?",
+        "language": "te",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unrelated_general_question_omits_previous_general_turn(ctx) -> None:
+    first_provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Docker is a container platform.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "What is Docker?"},
+        headers=headers,
+    )
+    assert len(first_provider.calls) == 1
+
+    second_provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Docker usa contenedores.")
+    )
+    response = await client.post(
+        "/conversation",
+        json={"message": "¿Qué es Docker?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert second_provider.calls[0]["context"] is None
+
+
+@pytest.mark.asyncio
+async def test_general_question_does_not_send_grounded_personal_context(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Kubernetes orchestrates containers.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await _make_project(client, headers, name="Private Project")
+
+    grounded = await client.post(
+        "/conversation", json={"message": "Show my projects."}, headers=headers
+    )
+    assert grounded.json()["action"] == "project.list"
+    assert provider.calls == []
+
+    general = await client.post(
+        "/conversation",
+        json={"message": "What is Kubernetes?"},
+        headers=headers,
+    )
+
+    assert general.status_code == 200, general.text
+    call = provider.calls[0]
+    assert call["include_personal_context"] is False
+    assert call["context"] is None
+
+
+@pytest.mark.asyncio
+async def test_personal_general_hybrid_may_send_bounded_rocky_context(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Start with the highest-impact active task.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Plan")
+    await _make_task(client, headers, project_id, title="Ship Rocky")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Which of my tasks should I do first?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    call = provider.calls[0]
+    assert call["include_personal_context"] is True
+    world = call["world"]
+    assert isinstance(world, WorldView)
+    assert [task.title for task in world.tasks] == ["Ship Rocky"]
+
+
+@pytest.mark.asyncio
+async def test_live_information_request_is_honest_without_provider_call(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="It is sunny.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What is the weather today?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is False
+    assert "don't have live access to weather" in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_action"),
+    [
+        ("What tasks do I have?", "task.list"),
+        ("Show my projects.", "project.list"),
+        ("What did I do yesterday?", "activity.recall"),
+    ],
+)
+async def test_known_capabilities_never_pay_general_assistant_latency(
+    ctx, message: str, expected_action: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="This must not be used.")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == expected_action
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio

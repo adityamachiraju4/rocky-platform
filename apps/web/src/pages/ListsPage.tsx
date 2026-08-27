@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from "react";
+import { useCallback, useRef, useState, type FormEvent } from "react";
 import AppShell from "../AppShell";
 import {
   createList,
@@ -26,6 +26,7 @@ export default function ListsPage() {
   const [busy, setBusy] = useState(false);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const editorRef = useRef<HTMLElement | null>(null);
 
   const lists = data ?? [];
   const selected = lists.find((list) => list.id === selectedId) ?? null;
@@ -35,6 +36,13 @@ export default function ListsPage() {
   );
   const items = useResource<RockyListItem[]>(itemFetcher);
   const sortedItems = [...(items.data ?? [])].sort((a, b) => a.position - b.position);
+
+  const selectList = (id: string) => {
+    setSelectedId(id);
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      requestAnimationFrame(() => editorRef.current?.scrollIntoView({ block: "start" }));
+    }
+  };
 
   const createNewList = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -46,7 +54,7 @@ export default function ListsPage() {
       const list = await createList({ title });
       setNewListTitle("");
       setFilter("active");
-      setSelectedId(list.id);
+      selectList(list.id);
       reload();
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : "List could not be created.");
@@ -162,7 +170,7 @@ export default function ListsPage() {
                     <li key={list.id}>
                       <button
                         className={selected?.id === list.id ? "select-row active" : "select-row"}
-                        onClick={() => setSelectedId(list.id)}
+                        onClick={() => selectList(list.id)}
                       >
                         <strong>{list.title}</strong>
                         <span>{relativeTime(list.updated_at)} · {list.status}</span>
@@ -173,7 +181,7 @@ export default function ListsPage() {
               )}
             </section>
 
-            <section className="mc-panel editor-panel">
+            <section className="mc-panel editor-panel" ref={editorRef}>
               {selected ? (
                 <>
                   <div className="page-head-split tight">
