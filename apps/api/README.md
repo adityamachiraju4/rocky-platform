@@ -1,106 +1,77 @@
-# Identity Core — Sprint 001
+# Rocky API
 
-Foundational identity subsystem for Project Rocky. No AI functionality is
-included in this sprint; this module provides users, preferences, devices,
-and sessions that later modules (Memory, Continuity, Planning) build upon.
+FastAPI backend for Rocky's personal intelligence workspace. The API owns
+identity, authentication, private capabilities, conversation orchestration,
+local transcription, speech synthesis, and trusted live-information providers.
 
-## Folder Structure
-
-```
-apps/api/
-    main.py                 FastAPI app entrypoint, mounts the identity router
-    database.py             Async engine, sessionmaker, get_session dependency
-    alembic.ini             Alembic configuration
-    alembic/
-        env.py              Async migration environment
-        versions/
-            0001_identity_core.py   Initial schema migration
-    identity/
-        __init__.py
-        models.py           SQLAlchemy ORM models (User, Preferences, Device, Session)
-        schemas.py          Pydantic v2 request/response schemas
-        repository.py       Database access only — no business logic
-        service.py          Business logic — orchestrates repositories
-        router.py           HTTP routing only — no business logic, no SQL
-        dependencies.py     Dependency-injection wiring
-        exceptions.py       Domain exceptions
-        tests/              Model, repository, service, and API tests
-```
-
-## Architecture
-
-Request flow follows a strict layering:
-
-```
-router  ->  service  ->  repository  ->  database
-(HTTP)      (logic)      (persistence)   (async session)
-```
-
-- **Routers** translate HTTP to/from the service layer and map domain
-  exceptions to HTTP status codes. They contain no business logic and issue
-  no SQL.
-- **Services** hold all business rules (e.g. uniqueness checks, creating a
-  default preferences row on user creation) and own transaction boundaries.
-- **Repositories** perform database access only.
-- **Dependency injection** supplies an async `AsyncSession` per request via
-  `get_session`, wrapped into an `IdentityService`.
-
-Everything is async, strictly typed, and uses Pydantic v2 for validation.
-
-## Model Relationships
-
-```
-User 1 ── 1 Preferences        (one-to-one, cascade delete)
-User 1 ── * Device             (one-to-many, cascade delete)
-User 1 ── * Session            (one-to-many, cascade delete)
-Device 1 ── * Session          (optional; session.device_id SET NULL on device delete)
-```
-
-### users
-`id` (UUID, PK), `email` (unique), `full_name`, `timezone`, `locale`,
-`is_active`, `created_at`, `updated_at`. Kept intentionally minimal and
-extensible.
-
-### preferences
-Separate from `users` to avoid duplicating identity data. `theme`,
-`language`, and a flexible JSONB `notifications` map. One row per user.
-
-### devices
-Registered devices: `device_id` (unique external id), `platform`,
-`device_name`, `last_seen`.
-
-### sessions
-Persistent sessions: `session_id` (`id`), `user_id`, `created_at`,
-`expires_at`, optional `device_id`.
-
-## API Endpoints
-
-| Method | Path                          | Description                       |
-|--------|-------------------------------|-----------------------------------|
-| POST   | `/identity/users`             | Create a user (+ default prefs)   |
-| GET    | `/identity/users/{id}`        | Fetch a user by id                |
-| PATCH  | `/identity/users/{id}`        | Partially update a user           |
-| GET    | `/identity/preferences/{user_id}` | Fetch a user's preferences    |
-| PATCH  | `/identity/preferences/{user_id}` | Update a user's preferences    |
-| GET    | `/identity/devices/{user_id}` | List a user's registered devices  |
-
-Errors: `404` for missing user/preferences, `409` for duplicate email.
-
-## Running
+## Run Locally
 
 ```bash
-# Tests (no Postgres needed — uses in-memory SQLite)
-pip install -r requirements-dev.txt
+cd /Users/adityamachiraju/rocky-platform/apps/api
+cp .env.example .env
+source .venv/bin/activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+The backend expects `SECRET_KEY` and `REFRESH_TOKEN_PEPPER` in `.env`. Database
+configuration can use either `DATABASE_URL` or the `POSTGRES_*` variables.
+
+## Tests
+
+```bash
+cd /Users/adityamachiraju/rocky-platform/apps/api
+source .venv/bin/activate
 pytest
+```
 
-# Full stack with Postgres + migrations
-docker compose up --build
+Migration parity tests are marked separately and require `TEST_DATABASE_URL`.
 
-# Apply migrations manually
+## Migrations
+
+```bash
+cd /Users/adityamachiraju/rocky-platform/apps/api
+source .venv/bin/activate
+alembic current
 alembic upgrade head
 ```
 
-## Out of Scope (future sprints)
+Run the Alembic commands whenever migrations change.
 
-Memory, Planner, AI Providers, LLM integration, Chat, Voice, Agents, Sync
-Engine.
+## Provider Configuration
+
+Core assistant:
+- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`
+
+Speech:
+- Local STT defaults to faster-whisper `small`.
+- `LOCAL_WHISPER_LANGUAGE=auto` keeps automatic speech-language detection.
+- Local English TTS defaults to Kokoro.
+- OpenAI speech/STT keys are optional fallbacks and must remain server-side.
+
+Live intelligence:
+- Weather uses Open-Meteo and needs no key.
+- Time uses Python `zoneinfo` and needs no key.
+- News requires `NEWS_API_KEY`.
+- Markets require `FINNHUB_API_KEY`.
+- Current web search requires `TAVILY_API_KEY`.
+- Places require `GEOAPIFY_API_KEY`.
+- Sports uses `THESPORTSDB_API_KEY`; the public development key is suitable
+  only for development.
+
+When optional provider credentials are missing, Rocky should answer honestly
+that the live provider is not configured. Never add fake data or expose
+provider secrets to the frontend.
+
+## Architecture Notes
+
+Conversation keeps private Rocky capability execution separate from live
+read-only tools:
+
+```text
+deterministic private capability
+  -> live information intent
+  -> general assistant fallback
+```
+
+The private capability registry remains the trust boundary for mutations.
+Live tools have their own closed read-only registry and strict schemas.

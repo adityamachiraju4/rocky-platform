@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useAuth } from "../useAuth";
 import { ApiError } from "../api";
 
@@ -10,7 +10,9 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const submit = async () => {
+  const submit = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (busy) return;
     setError(null);
     setBusy(true);
     try {
@@ -51,7 +53,7 @@ export default function LoginPage() {
       </aside>
 
       <main className="login-main">
-        <div className="login-card">
+        <form className="login-card" onSubmit={submit}>
           <h1 className="login-title">Welcome back</h1>
           <p className="login-subtitle">Sign in to your Rocky workspace</p>
 
@@ -68,11 +70,9 @@ export default function LoginPage() {
               className="field-input"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submit();
-              }}
               placeholder="you@example.com"
               autoComplete="username"
+              type="email"
             />
           </div>
 
@@ -90,9 +90,6 @@ export default function LoginPage() {
               type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submit();
-              }}
               placeholder="Enter your password"
               autoComplete="current-password"
             />
@@ -120,9 +117,9 @@ export default function LoginPage() {
           </div>
 
           <button
+            type="submit"
             className="btn-primary btn-block login-submit"
-            onClick={submit}
-            disabled={busy}
+            disabled={busy || !email.trim() || !password}
           >
             {busy ? "Signing in…" : "Sign in"}
           </button>
@@ -132,7 +129,7 @@ export default function LoginPage() {
               {error}
             </p>
           )}
-        </div>
+        </form>
       </main>
     </div>
   );

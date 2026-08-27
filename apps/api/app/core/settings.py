@@ -26,6 +26,12 @@ Environment variables
 * ``OPENAI_TRANSCRIPTION_API_KEY`` — optional official OpenAI key for STT.
 * ``OPENAI_TRANSCRIPTION_BASE_URL`` — optional transcription API base URL.
 * ``OPENAI_TRANSCRIPTION_MODEL`` — optional OpenAI transcription model.
+* ``LIVE_TIMEOUT_SECONDS`` — optional timeout for live-information providers.
+* ``NEWS_API_KEY`` — optional NewsAPI key for current news.
+* ``FINNHUB_API_KEY`` — optional Finnhub key for market quotes.
+* ``TAVILY_API_KEY`` — optional Tavily key for current web search.
+* ``GEOAPIFY_API_KEY`` — optional Geoapify key for places search.
+* ``THESPORTSDB_API_KEY`` — optional TheSportsDB key for sports lookup.
 * ``LOCAL_TTS_ENABLED`` — enable/disable local neural speech.
 * ``LOCAL_TTS_PROVIDER`` — local speech provider name.
 * ``LOCAL_TTS_VOICE`` — local Rocky audition/default voice.
@@ -74,6 +80,8 @@ _DEFAULT_LOCAL_WHISPER_LANGUAGE = "auto"
 _DEFAULT_LOCAL_WHISPER_WARMUP = True
 _DEFAULT_OPENAI_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+_DEFAULT_LIVE_TIMEOUT_SECONDS = 3.0
+_DEFAULT_THESPORTSDB_API_KEY = "123"
 _DEFAULT_LOCAL_TTS_ENABLED = True
 _DEFAULT_LOCAL_TTS_PROVIDER = "kokoro"
 _DEFAULT_LOCAL_TTS_VOICE = "am_adam"
@@ -242,6 +250,38 @@ def get_openai_transcription_model() -> str:
     )
 
 
+def get_live_timeout_seconds() -> float:
+    raw = os.getenv("LIVE_TIMEOUT_SECONDS")
+    if not raw:
+        return _DEFAULT_LIVE_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(
+            f"LIVE_TIMEOUT_SECONDS must be numeric, got {raw!r}"
+        ) from exc
+
+
+def get_news_api_key() -> str | None:
+    return os.getenv("NEWS_API_KEY") or None
+
+
+def get_finnhub_api_key() -> str | None:
+    return os.getenv("FINNHUB_API_KEY") or None
+
+
+def get_tavily_api_key() -> str | None:
+    return os.getenv("TAVILY_API_KEY") or None
+
+
+def get_geoapify_api_key() -> str | None:
+    return os.getenv("GEOAPIFY_API_KEY") or None
+
+
+def get_thesportsdb_api_key() -> str:
+    return os.getenv("THESPORTSDB_API_KEY") or _DEFAULT_THESPORTSDB_API_KEY
+
+
 def _is_official_openai_url(value: str) -> bool:
     normalized = value.strip().rstrip("/")
     return normalized == "https://api.openai.com/v1"
@@ -315,6 +355,12 @@ __all__ = [
     "get_openai_transcription_api_key",
     "get_openai_transcription_base_url",
     "get_openai_transcription_model",
+    "get_live_timeout_seconds",
+    "get_news_api_key",
+    "get_finnhub_api_key",
+    "get_tavily_api_key",
+    "get_geoapify_api_key",
+    "get_thesportsdb_api_key",
     "get_local_tts_enabled",
     "get_local_tts_provider",
     "get_local_tts_voice",

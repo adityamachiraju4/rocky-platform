@@ -91,7 +91,7 @@ def response_language(message: str, supplied_language: str | None = None) -> str
             return language
 
     supplied = normalize_language(supplied_language)
-    if supplied:
+    if supplied in SUPPORTED_RESPONSE_LANGUAGES:
         return supplied
     if re.search(r"[\u0900-\u097f]", message):
         return "hi"

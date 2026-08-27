@@ -6,7 +6,7 @@ import { useResource } from "../useApi";
 import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
 import { humanizeEvent } from "../activityLabels";
 import type { ConversationResponse, Reminder } from "../types";
-import { browserSpeechLanguage } from "../speechLanguage";
+import { startBrowserSpeech } from "../browserSpeech";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -59,7 +59,7 @@ const VALID_SPEECH_TYPES = new Set([
   "audio/ogg",
 ]);
 const SPEECH_DEBUG =
-  typeof window !== "undefined" && window.location.hostname === "localhost";
+  typeof window !== "undefined" && import.meta.env.DEV;
 const RECORDING_MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
@@ -300,7 +300,10 @@ function RockyInteraction({
       }
       audioSourceRef.current = null;
     }
-    window.speechSynthesis?.cancel();
+    const synthesis = window.speechSynthesis;
+    if (synthesis && (synthesis.speaking || synthesis.pending || synthesis.paused)) {
+      synthesis.cancel();
+    }
     setInteractionState((state) => (state === "speaking" ? "idle" : state));
   }, []);
 
@@ -390,28 +393,56 @@ function RockyInteraction({
     };
   }, [interactionState, micStarting, submitting]);
 
-  const speakBrowser = (reply: string, language: string, speechId: number) => {
+  const speakBrowser = async (reply: string, language: string, speechId: number) => {
     if (!speechSupported) return;
-    window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(reply);
-    utterance.lang = browserSpeechLanguage(language);
+    const browserSpeechState = () => ({
+      visibility: document.visibilityState,
+      userActivationActive: navigator.userActivation?.isActive,
+      userActivationSeen: navigator.userActivation?.hasBeenActive,
+      speaking: window.speechSynthesis.speaking,
+      pending: window.speechSynthesis.pending,
+      paused: window.speechSynthesis.paused,
+    });
+    speechDebug("browser speech preparing", browserSpeechState());
+    utterance.onstart = () => {
+      speechDebug("browser speech started", browserSpeechState());
+    };
     utterance.onend = () => {
+      speechDebug("browser speech ended", browserSpeechState());
       if (speechIdRef.current === speechId) {
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
         browserSpeechTimerRef.current = null;
         setInteractionState("idle");
       }
     };
-    utterance.onerror = () => {
+    utterance.onerror = (event) => {
+      speechDebug("browser speech failed", {
+        ...browserSpeechState(),
+        error: event.error,
+      });
       if (speechIdRef.current === speechId) {
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
         browserSpeechTimerRef.current = null;
         setInteractionState("idle");
       }
+    };
+    utterance.onpause = () => {
+      speechDebug("browser speech paused", browserSpeechState());
+    };
+    utterance.onresume = () => {
+      speechDebug("browser speech resumed", browserSpeechState());
     };
     setInteractionState("speaking");
-    try {
-      window.speechSynthesis.speak(utterance);
+    const result = await startBrowserSpeech({
+      engine: window.speechSynthesis,
+      utterance,
+      language,
+      enabled: spokenOutputRef.current,
+      isCurrent: () => lifecycleActiveRef.current && speechIdRef.current === speechId,
+    });
+    if (result === "started") {
+      speechDebug("browser speech queued", browserSpeechState());
       browserSpeechTimerRef.current = window.setTimeout(() => {
         if (speechIdRef.current !== speechId) return;
         window.speechSynthesis.cancel();
@@ -419,7 +450,8 @@ function RockyInteraction({
         setInteractionState("idle");
         setVoiceError("Audio playback stopped. The text response is still available; use Replay to try again.");
       }, Math.max(15_000, Math.min(120_000, reply.length * 90)));
-    } catch {
+    } else if (result === "failed") {
+      speechDebug("browser speech could not be queued", browserSpeechState());
       setInteractionState("idle");
       setVoiceError("Audio couldn't start. The text response is still available; use Replay to try again.");
     }
@@ -519,7 +551,7 @@ function RockyInteraction({
       });
       stopRockySpeech();
       const browserSpeechId = speechIdRef.current;
-      speakBrowser(reply, language, browserSpeechId);
+      await speakBrowser(reply, language, browserSpeechId);
       if (speechSupported) {
         setVoiceError(
           e instanceof ApiError

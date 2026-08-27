@@ -56,4 +56,6 @@ async def transcribe_audio(
         text=result.text,
         language=result.language,
         language_probability=result.language_probability,
+        raw_language=result.raw_language,
+        raw_language_probability=result.raw_language_probability,
     )

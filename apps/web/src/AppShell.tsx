@@ -15,10 +15,11 @@ const navigation = [
   { label: "Settings", shortLabel: "Settings", icon: "settings", to: "/settings" },
 ] as const satisfies ReadonlyArray<{ label: string; shortLabel: string; icon: IconName; to: string; end?: boolean }>;
 
-const mobilePrimary = ["/", "/tasks", "/projects", "/activity"];
+const mobilePrimary = ["/", "/projects", "/tasks", "/activity"];
 const mobileMore = [
-  ...navigation.filter((item) => !mobilePrimary.includes(item.to)),
+  ...navigation.filter((item) => ["/reminders", "/notes", "/lists"].includes(item.to)),
   { label: "Notifications", shortLabel: "Notifications", icon: "notifications" as const, to: "/notifications" },
+  { label: "Settings", shortLabel: "Settings", icon: "settings" as const, to: "/settings" },
 ];
 
 function NavIcon({ name }: { name: IconName }) {
@@ -114,16 +115,16 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </NavLink>
         ))}
         <div className="mobile-more" ref={moreRef}>
-          <button className={moreOpen || mobileMore.some((item) => location.pathname.startsWith(item.to)) ? "mobile-nav-link active" : "mobile-nav-link"} type="button" aria-expanded={moreOpen} aria-controls="mobile-more-menu" onClick={() => setMoreOpen((open) => !open)}>
+          <button className={moreOpen || mobileMore.some((item) => location.pathname.startsWith(item.to)) ? "mobile-nav-link active" : "mobile-nav-link"} type="button" aria-haspopup="menu" aria-expanded={moreOpen} aria-controls="mobile-more-menu" onClick={() => setMoreOpen((open) => !open)}>
             <NavIcon name="more" />
             <span>More</span>
           </button>
           {moreOpen && (
-            <div className="mobile-more-menu" id="mobile-more-menu">
+            <div className="mobile-more-menu" id="mobile-more-menu" role="menu">
               {mobileMore.map((item) => (
-                <NavLink key={item.to} to={item.to} onClick={() => setMoreOpen(false)}><NavIcon name={item.icon} /><span>{item.label}</span></NavLink>
+                <NavLink key={item.to} to={item.to} role="menuitem" onClick={() => setMoreOpen(false)}><NavIcon name={item.icon} /><span>{item.label}</span></NavLink>
               ))}
-              <button type="button" onClick={onSignOut}><NavIcon name="signout" /><span>Sign out</span></button>
+              <button type="button" role="menuitem" onClick={onSignOut}><NavIcon name="signout" /><span>Sign out</span></button>
             </div>
           )}
         </div>

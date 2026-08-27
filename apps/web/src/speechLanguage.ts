@@ -1,5 +1,8 @@
 const REGIONAL_SPEECH_LANGUAGES: Readonly<Record<string, string>> = {
+  hi: "hi-IN",
+  te: "te-IN",
   ta: "ta-IN",
+  es: "es-ES",
 };
 
 export function browserSpeechLanguage(language: string): string {

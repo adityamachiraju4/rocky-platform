@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.transcription.provider import TranscriptionProviderError, TranscriptionResult
+from app.transcription.language_stabilizer import stabilize_transcription_language
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,8 @@ class LocalWhisperTranscriptionProvider:
         segments = list(segments)
         detected_language = getattr(info, "language", None) or configured_language
         language_probability = getattr(info, "language_probability", None)
+        raw_language = detected_language
+        raw_language_probability = language_probability
 
         if self._should_try_english_fallback(
             configured_language,
@@ -174,6 +177,25 @@ class LocalWhisperTranscriptionProvider:
                 )
 
         text = "".join(segment.text for segment in segments).strip()
+        normalized_language_probability = (
+            float(language_probability)
+            if isinstance(language_probability, (float, int))
+            else None
+        )
+        normalized_raw_language_probability = (
+            float(raw_language_probability)
+            if isinstance(raw_language_probability, (float, int))
+            else None
+        )
+        stable_language = (
+            detected_language
+            if configured_language is not None
+            else stabilize_transcription_language(
+                text,
+                detected_language,
+                normalized_language_probability,
+            )
+        )
         logger.info(
             "Local Whisper inference complete: elapsed_ms=%.1f model=%s",
             (time.perf_counter() - started) * 1000,
@@ -187,12 +209,10 @@ class LocalWhisperTranscriptionProvider:
             )
         return TranscriptionResult(
             text=text,
-            language=detected_language,
-            language_probability=(
-                float(language_probability)
-                if isinstance(language_probability, (float, int))
-                else None
-            ),
+            language=stable_language,
+            language_probability=normalized_language_probability,
+            raw_language=raw_language,
+            raw_language_probability=normalized_raw_language_probability,
         )
 
     @staticmethod

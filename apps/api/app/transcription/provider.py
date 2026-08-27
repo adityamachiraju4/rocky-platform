@@ -10,6 +10,8 @@ class TranscriptionResult:
     text: str
     language: str | None = None
     language_probability: float | None = None
+    raw_language: str | None = None
+    raw_language_probability: float | None = None
 
 
 class TranscriptionProviderError(RuntimeError):

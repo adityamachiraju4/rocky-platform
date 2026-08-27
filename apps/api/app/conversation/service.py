@@ -51,6 +51,8 @@ from app.notes.schemas import NoteCreate, NoteUpdate
 from app.notes.service import NotesService
 from app.lists.schemas import ListCreate, ListItemCreate, ListItemUpdate, ListUpdate
 from app.lists.service import ListsService
+from app.live.responder import render_live_result
+from app.live.service import LiveIntelligenceService
 
 from app.conversation import registry
 from app.conversation.context import (
@@ -184,6 +186,7 @@ class ConversationService:
         resolver: Resolver | None = None,
         responder: Responder | None = None,
         understanding_provider: UnderstandingProvider | None = None,
+        live_service: LiveIntelligenceService | None = None,
         context_store: ConversationContextStore | None = None,
         clock: Clock = system_clock,
     ) -> None:
@@ -206,6 +209,7 @@ class ConversationService:
         # dispatch. Defaults to the deterministic grounded template.
         self._responder: Responder = responder or TemplateResponder()
         self._understanding_provider = understanding_provider
+        self._live_service = live_service
         self._context_store = context_store
 
     async def _build_world(self, current_user: User) -> WorldView:
@@ -305,6 +309,16 @@ class ConversationService:
         try:
             action = self._resolver.resolve(resolver_message, world)
         except NoMatchError:
+            if self._live_service is not None:
+                live_intent = self._live_service.resolve(message)
+                if live_intent is not None:
+                    live_result = await self._live_service.execute(live_intent)
+                    return ConversationResponse(
+                        executed=False,
+                        action=live_result.tool_name,
+                        reply=render_live_result(live_result),
+                        language=turn_language,
+                    )
             live_category = (
                 live_information_category(message)
                 or self._live_information_category(message)

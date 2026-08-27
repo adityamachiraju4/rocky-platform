@@ -38,6 +38,10 @@ from app.transcription.dependencies import (
 from app.transcription.local_whisper_provider import (
     LocalWhisperTranscriptionProvider,
 )
+from app.transcription.language_stabilizer import (
+    script_evidence,
+    stabilize_transcription_language,
+)
 from app.transcription.openai_provider import (
     OpenAITranscriptionProvider,
     _openai_error_metadata,
@@ -184,6 +188,8 @@ async def test_transcription_success_returns_text(ctx) -> None:
         "text": "Create a project called Atlas",
         "language": None,
         "language_probability": None,
+        "raw_language": None,
+        "raw_language_probability": None,
     }
 
 
@@ -210,6 +216,8 @@ async def test_transcription_returns_detected_language_metadata(ctx) -> None:
         "text": "నా పనులు ఏమిటి?",
         "language": "te",
         "language_probability": 0.94,
+        "raw_language": None,
+        "raw_language_probability": None,
     }
     assert provider.calls == [
         {
@@ -359,6 +367,90 @@ def test_local_whisper_language_can_be_configured(
     assert settings.get_local_whisper_language() == "es"
     assert isinstance(provider, LocalWhisperTranscriptionProvider)
     assert provider.language == "es"
+
+
+def test_language_stabilizer_uses_clear_english_over_marginal_spanish() -> None:
+    language = stabilize_transcription_language(
+        "What tasks do I have today?",
+        "es",
+        0.42,
+    )
+
+    assert language == "en"
+
+
+def test_language_stabilizer_keeps_strong_spanish_evidence() -> None:
+    language = stabilize_transcription_language(
+        "¿Qué tareas tengo hoy?",
+        "es",
+        0.91,
+    )
+
+    assert language == "es"
+
+
+@pytest.mark.parametrize("detected_language", ["hi", "bn"])
+def test_language_stabilizer_prefers_telugu_script_over_wrong_indic_label(
+    detected_language: str,
+) -> None:
+    language = stabilize_transcription_language(
+        "డాకర్ అంటే ఏమిటి?",
+        detected_language,
+        0.48,
+    )
+
+    assert language == "te"
+
+
+def test_language_stabilizer_prefers_tamil_script() -> None:
+    language = stabilize_transcription_language(
+        "எனக்கு என்ன வேலைகள் உள்ளன?",
+        "hi",
+        0.72,
+    )
+
+    assert language == "ta"
+
+
+def test_language_stabilizer_strong_switch_overrides_prior_language() -> None:
+    language = stabilize_transcription_language(
+        "What tasks do I have today?",
+        "en",
+        0.94,
+        previous_language="te",
+    )
+
+    assert language == "en"
+
+
+def test_language_stabilizer_weak_ambiguous_detection_can_use_prior() -> None:
+    language = stabilize_transcription_language(
+        "Docker",
+        "bn",
+        0.31,
+        previous_language="te",
+    )
+
+    assert language == "te"
+
+
+def test_language_stabilizer_does_not_lock_to_prior_language() -> None:
+    language = stabilize_transcription_language(
+        "¿Qué tareas tengo hoy?",
+        "es",
+        0.92,
+        previous_language="te",
+    )
+
+    assert language == "es"
+
+
+def test_script_evidence_identifies_telugu_unicode_range() -> None:
+    evidence = script_evidence("నా పనులు ఏమిటి?")
+
+    assert evidence.language == "te"
+    assert evidence.script == "telugu"
+    assert evidence.counts["te"] >= 2
 
 
 def test_transcription_provider_reuses_cached_local_provider() -> None:
@@ -577,6 +669,54 @@ async def test_local_whisper_auto_propagates_detected_language(
     assert result.text == "డాకర్ అంటే ఏమిటి?"
     assert result.language == "te"
     assert result.language_probability == 0.93
+    assert result.raw_language == "te"
+    assert result.raw_language_probability == 0.93
+    assert _WhisperModel.calls == [{"language": None, "task": "transcribe"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detected_language", ["hi", "bn"])
+async def test_local_whisper_auto_stabilizes_telugu_script_misdetections(
+    monkeypatch: pytest.MonkeyPatch,
+    detected_language: str,
+) -> None:
+    class _Segment:
+        text = " డాకర్ అంటే ఏమిటి?"
+        avg_logprob = -0.2
+
+    class _WhisperModel:
+        calls: list[dict[str, object]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _path: str, **kwargs):
+            type(self).calls.append(kwargs)
+            return [_Segment()], SimpleNamespace(
+                language=detected_language, language_probability=0.49
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    provider = LocalWhisperTranscriptionProvider(
+        model_name="small",
+        device="auto",
+        compute_type="auto",
+        language="auto",
+    )
+
+    result = await provider.transcribe(
+        b"audio", filename="speech.webm", content_type="audio/webm"
+    )
+
+    assert result.text == "డాకర్ అంటే ఏమిటి?"
+    assert result.language == "te"
+    assert result.language_probability == 0.49
+    assert result.raw_language == detected_language
+    assert result.raw_language_probability == 0.49
     assert _WhisperModel.calls == [{"language": None, "task": "transcribe"}]
 
 
@@ -619,6 +759,8 @@ async def test_local_whisper_auto_propagates_detected_tamil(
     assert result.text == "எனக்கு என்ன வேலைகள் உள்ளன?"
     assert result.language == "ta"
     assert result.language_probability == 0.88
+    assert result.raw_language == "ta"
+    assert result.raw_language_probability == 0.88
     assert _WhisperModel.calls == [{"language": None, "task": "transcribe"}]
 
 
@@ -665,6 +807,9 @@ async def test_local_whisper_auto_rechecks_low_confidence_latin_detection_as_eng
 
     assert result.text == "Can you hear me?"
     assert result.language == "en"
+    assert result.language_probability == 1.0
+    assert result.raw_language == "es"
+    assert result.raw_language_probability == 0.42
     assert [call["language"] for call in _WhisperModel.calls] == [None, "en"]
 
 

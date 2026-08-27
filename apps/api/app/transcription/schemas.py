@@ -8,3 +8,5 @@ class TranscriptionResponse(BaseModel):
     text: str = Field(min_length=1)
     language: str | None = None
     language_probability: float | None = Field(default=None, ge=0, le=1)
+    raw_language: str | None = None
+    raw_language_probability: float | None = Field(default=None, ge=0, le=1)

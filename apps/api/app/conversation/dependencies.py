@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import settings
 from app.core.dependencies import get_session
+from app.live.dependencies import LiveIntelligenceServiceDep
 
 from app.conversation.context import (
     ConversationContextStore,
@@ -58,6 +59,7 @@ def get_conversation_service(
         UnderstandingProvider | None,
         Depends(get_understanding_provider),
     ],
+    live_service: LiveIntelligenceServiceDep,
     context_store: Annotated[
         ConversationContextStore,
         Depends(get_conversation_context_store),
@@ -66,6 +68,7 @@ def get_conversation_service(
     return ConversationService(
         session,
         understanding_provider=provider,
+        live_service=live_service,
         context_store=context_store,
     )
 

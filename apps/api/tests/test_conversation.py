@@ -66,6 +66,9 @@ from app.conversation.understanding import (
     Unsupported,
     safe_world_payload,
 )
+from app.live.dependencies import get_live_intelligence_service
+from app.live.service import LiveLookupResult
+from app.live.schemas import SourceMetadata, WeatherReport
 
 SECRET = "test-secret-key"
 PEPPER = "test-refresh-pepper"
@@ -90,6 +93,34 @@ def _use_fake_provider(result: object | Exception) -> _FakeUnderstandingProvider
         lambda: provider
     )
     return provider
+
+
+class _FakeLiveService:
+    def __init__(self, result: LiveLookupResult | None) -> None:
+        self._result = result
+        self.resolved: list[str] = []
+        self.executed: list[object] = []
+
+    def resolve(self, message: str) -> object | None:
+        self.resolved.append(message)
+        if self._result is None:
+            return None
+        from app.live.intent import resolve_live_intent
+
+        return resolve_live_intent(message)
+
+    async def execute(self, intent: object) -> LiveLookupResult:
+        self.executed.append(intent)
+        assert self._result is not None
+        return self._result
+
+
+def _use_fake_live_service(result: LiveLookupResult | None) -> _FakeLiveService:
+    service = _FakeLiveService(result)
+    fastapi_app.dependency_overrides[get_live_intelligence_service] = (
+        lambda: service
+    )
+    return service
 
 
 class _FakeResponses:
@@ -149,6 +180,7 @@ async def ctx() -> AsyncIterator[tuple[httpx.AsyncClient, async_sessionmaker]]:
                 raise
 
     fastapi_app.dependency_overrides[get_session] = _override_get_session
+    fastapi_app.dependency_overrides[get_live_intelligence_service] = lambda: None
     try:
         transport = ASGITransport(app=fastapi_app)
         async with AsyncClient(
@@ -158,6 +190,7 @@ async def ctx() -> AsyncIterator[tuple[httpx.AsyncClient, async_sessionmaker]]:
     finally:
         fastapi_app.dependency_overrides.pop(get_session, None)
         fastapi_app.dependency_overrides.pop(get_understanding_provider, None)
+        fastapi_app.dependency_overrides.pop(get_live_intelligence_service, None)
         await engine.dispose()
 
 
@@ -1443,6 +1476,28 @@ async def test_multilingual_general_questions_request_same_language_without_worl
 
 
 @pytest.mark.asyncio
+async def test_unsupported_supplied_language_does_not_override_telugu_script(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Docker అంటే ఏమిటి?", "language": "bn"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["language"] == "te"
+    assert provider.calls[0]["response_language"] == "te"
+
+
+@pytest.mark.asyncio
 async def test_explicit_response_language_overrides_input_language(ctx) -> None:
     provider = _use_fake_provider(
         ConversationTurn(kind="conversation", reply="डॉकर एक कंटेनर प्लेटफ़ॉर्म है।")
@@ -1489,6 +1544,128 @@ async def test_multilingual_live_data_refusal_is_local_and_same_language(
     assert body["executed"] is False
     assert body["language"] == language
     assert fragment in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_weather_routes_before_general_assistant(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Provider must not answer live data.")
+    )
+    _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            WeatherReport(
+                location="Hyderabad, India",
+                window="current",
+                temperature_c=29.0,
+                condition="partly cloudy",
+                precipitation_probability=20,
+                source=SourceMetadata(
+                    provider="fake-weather",
+                    retrieved_at=datetime.now(timezone.utc),
+                    freshness="test",
+                ),
+            ),
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["executed"] is False
+    assert body["action"] == "weather.current"
+    assert "Hyderabad, India" in body["reply"]
+    assert "fake-weather" in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_provider_failure_is_honest_and_does_not_fallback_to_model(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Fabricated live answer")
+    )
+    _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            None,
+            error_code="provider_timeout",
+            error_message="Weather provider timed out.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What's the weather in London?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reply"] == "I couldn't retrieve weather information quickly enough."
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_evergreen_general_question_still_uses_general_assistant(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="Photosynthesis turns light into chemical energy.",
+        )
+    )
+    live = _use_fake_live_service(None)
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What is photosynthesis?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reply"] == "Photosynthesis turns light into chemical energy."
+    assert len(provider.calls) == 1
+    assert live.executed == []
+
+
+@pytest.mark.asyncio
+async def test_deterministic_private_capability_takes_priority_over_live(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Provider must not run.")
+    )
+    live = _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            None,
+            error_code="should_not_run",
+            error_message="Live should not run.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Rocky")
+    await _make_task(client, headers, project_id, title="Ship M6")
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What tasks do I have today?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "task.list"
+    assert "Ship M6" in response.json()["reply"]
+    assert live.executed == []
     assert provider.calls == []
 
 
