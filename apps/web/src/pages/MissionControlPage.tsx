@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { Capacitor } from "@capacitor/core";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import AppShell from "../AppShell";
 import { ApiError, AuthExpiredError, sendConversation, synthesizeSpeech, transcribeAudio } from "../api";
@@ -8,6 +9,23 @@ import { humanizeEvent } from "../activityLabels";
 import type { ConversationResponse, DeviceLocationContext, Reminder } from "../types";
 import { startBrowserSpeech, type BrowserSpeechStartResult } from "../browserSpeech";
 import { needsDeviceLocation, requestDeviceLocationContext } from "../locationContext";
+import {
+  evaluateVoiceActivityLevel,
+  inspectVoiceActivityLevel,
+  initialVoiceActivityState,
+  isDegenerateNativeCapture,
+  MAX_RECORDING_MS,
+  MIN_RECORDING_MS,
+  rawSignalStatsFromByteTimeDomain,
+  recordingAudioConstraints,
+  shouldRejectDegenerateNativeCapture,
+  shouldReacquireSilentNativeCapture,
+  shouldStopExhaustedNativeCaptureRecovery,
+  terminalPlaybackRuntimeState,
+  terminalRecordingRuntimeState,
+  validateRecordingForTranscription,
+  type VoiceActivityState,
+} from "../voiceActivity";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -49,6 +67,15 @@ type SpeechWindow = Window & {
 
 type InteractionState = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 
+interface RecordingDiagnostics {
+  analyserMinRms: number;
+  analyserMaxRms: number;
+  maxAbsoluteSample: number;
+  chunkSizes: number[];
+  detectorFrameCount: number;
+  zeroSignalFrameCount: number;
+}
+
 const MAX_AUTO_SPEECH_CHARS = 1200;
 const VALID_SPEECH_TYPES = new Set([
   "audio/wav",
@@ -60,7 +87,24 @@ const VALID_SPEECH_TYPES = new Set([
   "audio/ogg",
 ]);
 const SPEECH_DEBUG =
-  typeof window !== "undefined" && import.meta.env.DEV;
+  typeof window !== "undefined"
+  && (import.meta.env.DEV || import.meta.env.VITE_SPEECH_DEBUG === "true");
+const SPEECH_DIAGNOSTICS =
+  typeof window !== "undefined"
+  && import.meta.env.VITE_SPEECH_DEBUG === "true";
+const SPEECH_DISABLE_AUDIO_PROCESSING =
+  typeof window !== "undefined"
+  && import.meta.env.VITE_SPEECH_DISABLE_AUDIO_PROCESSING === "true";
+const SILENT_CAPTURE_REACQUIRE_MS = 1_600;
+const SILENT_CAPTURE_REACQUIRE_MIN_FRAMES = 20;
+const SILENT_CAPTURE_REACQUIRE_ZERO_FRAME_RATIO = 0.85;
+const DEGENERATE_CAPTURE_REJECT_MS = 1_600;
+const DEGENERATE_CAPTURE_REJECT_MIN_FRAMES = 20;
+const DEGENERATE_CAPTURE_ZERO_FRAME_RATIO = 0.85;
+const DEGENERATE_CAPTURE_MAX_PEAK_RMS = 0.05;
+const MAX_SILENT_CAPTURE_REACQUIRE_ATTEMPTS = 2;
+const CAPTURE_REACQUIRE_STOP_REASON = "silent-capture-reacquire";
+const CAPTURE_RECOVERY_EXHAUSTED_STOP_REASON = "capture-recovery-exhausted";
 const RECORDING_MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
@@ -69,10 +113,6 @@ const RECORDING_MIME_TYPES = [
   "audio/ogg;codecs=opus",
   "audio/ogg",
 ];
-const SPEECH_LEVEL_THRESHOLD = 0.035;
-const SILENCE_STOP_MS = 900;
-const MIN_RECORDING_MS = 700;
-const MAX_RECORDING_MS = 30_000;
 const SPOKEN_OUTPUT_KEY = "rocky.spoken-output";
 
 // Resolve an activity event to the in-app route for its entity, when we can.
@@ -180,10 +220,78 @@ function audioContextCtor(): typeof AudioContext | null {
   return window.AudioContext ?? w.webkitAudioContext ?? null;
 }
 
-function speechDebug(message: string, metadata: Record<string, unknown> = {}) {
-  if (SPEECH_DEBUG) {
-    console.info(`[Rocky speech] ${message}`, metadata);
+function isNativeSpeechCapture(): boolean {
+  return Capacitor.isNativePlatform();
+}
+
+function monotonicNow(): number {
+  return performance.now();
+}
+
+function requestTimingStarted(route: string): { route: string; startedAt: number; startedAtIso: string } {
+  return {
+    route,
+    startedAt: monotonicNow(),
+    startedAtIso: new Date().toISOString(),
+  };
+}
+
+function requestFailureReason(error: unknown, signal?: AbortSignal): string {
+  if (signal?.aborted) return "abort";
+  if (error instanceof AuthExpiredError) return "auth-expired";
+  if (error instanceof ApiError) return `api-${error.status}`;
+  if (error instanceof DOMException) return error.name;
+  if (error instanceof Error) return error.name;
+  return typeof error;
+}
+
+function formatSpeechMetadata(metadata: object): string {
+  if (Object.keys(metadata).length === 0) return "";
+  try {
+    return ` ${JSON.stringify(metadata)}`;
+  } catch {
+    return " {\"metadata\":\"unserializable\"}";
   }
+}
+
+function speechDebug(message: string, metadata: object = {}) {
+  if (SPEECH_DEBUG) {
+    console.info(`[Rocky speech] ${message}${formatSpeechMetadata(metadata)}`);
+  }
+}
+
+function speechDiagnostic(message: string, metadata: object = {}) {
+  if (SPEECH_DIAGNOSTICS) {
+    console.info(`[Rocky speech diagnostic] ${message}${formatSpeechMetadata(metadata)}`);
+  }
+}
+
+async function logAudioInputDevices(recordingSessionId: number) {
+  if (!SPEECH_DIAGNOSTICS || !navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    speechDiagnostic("audio devices", {
+      recordingSessionId,
+      audioInputs: devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device) => ({
+          kind: device.kind,
+          label: device.label,
+          deviceId: device.deviceId,
+          groupId: device.groupId,
+        })),
+    });
+  } catch (error) {
+    speechDiagnostic("audio devices unavailable", {
+      recordingSessionId,
+      name: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function roundedAudioLevel(value: number): number {
+  return Number(value.toFixed(6));
 }
 
 function RockyInteraction({
@@ -209,17 +317,28 @@ function RockyInteraction({
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordingSessionIdRef = useRef(0);
   const audioChunksRef = useRef<Blob[]>([]);
+  const recordingDiagnosticsRef = useRef<RecordingDiagnostics>({
+    analyserMinRms: Number.POSITIVE_INFINITY,
+    analyserMaxRms: 0,
+    maxAbsoluteSample: 0,
+    chunkSizes: [],
+    detectorFrameCount: 0,
+    zeroSignalFrameCount: 0,
+  });
   const voiceAudioContextRef = useRef<AudioContext | null>(null);
   const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
   const voiceFrameRef = useRef<number | null>(null);
+  const voiceDiagnosticTimerRef = useRef<number | null>(null);
   const maxRecordingTimerRef = useRef<number | null>(null);
   const recordingStartedAtRef = useRef(0);
   const recordingStopRequestedAtRef = useRef<number | null>(null);
+  const recordingStopReasonRef = useRef<string | null>(null);
   const voiceRoundTripStartedAtRef = useRef<number | null>(null);
-  const speechDetectedRef = useRef(false);
-  const silenceStartedAtRef = useRef<number | null>(null);
+  const voiceActivityRef = useRef<VoiceActivityState>(initialVoiceActivityState());
+  const silentCaptureReacquireAttemptsRef = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const latestResponseRef = useRef<HTMLDivElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -243,6 +362,7 @@ function RockyInteraction({
     ? "Voice input requires a secure connection. Typing is still available."
     : "Voice input is unavailable in this browser. Typing is still available.";
   const currentState = stateCopy(interactionState);
+  const visualState = voiceError || error ? "error" : interactionState;
   const hasDraft = draft.trim().length > 0;
 
   const resizeComposer = useCallback(() => {
@@ -259,18 +379,41 @@ function RockyInteraction({
       window.cancelAnimationFrame(voiceFrameRef.current);
       voiceFrameRef.current = null;
     }
+    if (voiceDiagnosticTimerRef.current !== null) {
+      window.clearInterval(voiceDiagnosticTimerRef.current);
+      voiceDiagnosticTimerRef.current = null;
+    }
     if (maxRecordingTimerRef.current !== null) {
       window.clearTimeout(maxRecordingTimerRef.current);
       maxRecordingTimerRef.current = null;
     }
     const context = voiceAudioContextRef.current;
     voiceAudioContextRef.current = null;
-    voiceSourceRef.current?.disconnect();
+    try {
+      voiceSourceRef.current?.disconnect();
+    } catch (error) {
+      speechDiagnostic("voice source disconnect failed", {
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     voiceSourceRef.current = null;
-    voiceAnalyserRef.current?.disconnect();
+    try {
+      voiceAnalyserRef.current?.disconnect();
+    } catch (error) {
+      speechDiagnostic("voice analyser disconnect failed", {
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     voiceAnalyserRef.current = null;
     if (context && context.state !== "closed") {
-      void context.close();
+      void context.close().catch((error: unknown) => {
+        speechDiagnostic("voice audio context close failed", {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
   }, []);
 
@@ -285,7 +428,49 @@ function RockyInteraction({
     mediaRecorderRef.current = null;
   }, [cleanupVoiceDetection, stopMediaStream]);
 
-  const stopRockySpeech = useCallback(() => {
+  const resetRecordingTerminalState = useCallback(() => {
+    audioChunksRef.current = [];
+    recordingStartingRef.current = false;
+    setMicStarting(false);
+    setListening(false);
+    setInteractionState("idle");
+    try {
+      cleanupRecording();
+    } catch (error) {
+      speechDiagnostic("recording cleanup failed", {
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      mediaRecorderRef.current = null;
+    }
+  }, [cleanupRecording]);
+
+  const reacquireRecordingCapture = (recordingSessionId: number) => {
+    speechDiagnostic("recording terminal state", {
+      recordingSessionId,
+      ...terminalRecordingRuntimeState("cancelled"),
+    });
+    resetRecordingTerminalState();
+    window.setTimeout(() => {
+      void startRecordingCapture(true);
+    }, 0);
+  };
+
+  const closePlaybackContext = useCallback(() => {
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context && context.state !== "closed") {
+      speechDiagnostic("playback audio context closing", { state: context.state });
+      void context.close().catch((error: unknown) => {
+        speechDiagnostic("playback audio context close failed", {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  }, []);
+
+  const stopRockySpeech = useCallback((options: { releasePlaybackContext?: boolean } = {}) => {
     speechIdRef.current += 1;
     speechAbortRef.current?.abort();
     speechAbortRef.current = null;
@@ -306,14 +491,10 @@ function RockyInteraction({
     if (synthesis && (synthesis.speaking || synthesis.pending || synthesis.paused)) {
       synthesis.cancel();
     }
+    speechDiagnostic("playback terminal state", terminalPlaybackRuntimeState("interrupted"));
+    if (options.releasePlaybackContext) closePlaybackContext();
     setInteractionState((state) => (state === "speaking" ? "idle" : state));
-  }, []);
-
-  const closePlaybackContext = useCallback(() => {
-    const context = audioContextRef.current;
-    audioContextRef.current = null;
-    if (context && context.state !== "closed") void context.close();
-  }, []);
+  }, [closePlaybackContext]);
 
   const cancelActiveTurn = useCallback((updateUi: boolean) => {
     turnIdRef.current += 1;
@@ -347,8 +528,12 @@ function RockyInteraction({
         recorder.onstop = null;
         recorder.stop();
       }
+      speechDiagnostic("recording terminal state", {
+        recordingSessionId: recordingSessionIdRef.current,
+        ...terminalRecordingRuntimeState("cancelled"),
+      });
       cleanupRecording();
-      stopRockySpeech();
+      stopRockySpeech({ releasePlaybackContext: true });
       closePlaybackContext();
       cancelActiveTurn(true);
     };
@@ -383,8 +568,12 @@ function RockyInteraction({
         mediaRecorderRef.current.onstop = null;
         mediaRecorderRef.current.stop();
       }
+      speechDiagnostic("recording terminal state", {
+        recordingSessionId: recordingSessionIdRef.current,
+        ...terminalRecordingRuntimeState("cancelled"),
+      });
       cleanupRecording();
-      stopRockySpeech();
+      stopRockySpeech({ releasePlaybackContext: true });
       closePlaybackContext();
       cancelActiveTurn(false);
     };
@@ -443,6 +632,7 @@ function RockyInteraction({
       if (speechIdRef.current === speechId) {
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
         browserSpeechTimerRef.current = null;
+        speechDiagnostic("playback terminal state", terminalPlaybackRuntimeState("ended"));
         setInteractionState("idle");
       }
     };
@@ -454,6 +644,7 @@ function RockyInteraction({
       if (speechIdRef.current === speechId) {
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
         browserSpeechTimerRef.current = null;
+        speechDiagnostic("playback terminal state", terminalPlaybackRuntimeState("interrupted"));
         setInteractionState("idle");
         setVoiceError("Browser voice couldn't play. The text response is still available; use Replay to try again.");
       }
@@ -478,6 +669,7 @@ function RockyInteraction({
         if (speechIdRef.current !== speechId) return;
         window.speechSynthesis.cancel();
         browserSpeechTimerRef.current = null;
+        speechDiagnostic("playback terminal state", terminalPlaybackRuntimeState("interrupted"));
         setInteractionState("idle");
         setVoiceError("Audio playback stopped. The text response is still available; use Replay to try again.");
       }, Math.max(15_000, Math.min(120_000, reply.length * 90)));
@@ -535,6 +727,7 @@ function RockyInteraction({
     source.onended = () => {
       if (audioSourceRef.current === source && speechIdRef.current === speechId) {
         audioSourceRef.current = null;
+        speechDiagnostic("playback terminal state", terminalPlaybackRuntimeState("ended"));
         closePlaybackContext();
         setInteractionState("idle");
       }
@@ -560,13 +753,19 @@ function RockyInteraction({
     const controller = new AbortController();
     speechAbortRef.current = controller;
     setInteractionState("speaking");
-    const speechStartedAt = performance.now();
-    speechDebug("speech request started");
+    const speechTiming = requestTimingStarted("/speech");
+    speechDebug("speech request started", {
+      route: speechTiming.route,
+      startedAt: speechTiming.startedAtIso,
+    });
     try {
       const response = await synthesizeSpeech({ text: reply, language }, controller.signal);
       if (controller.signal.aborted || speechIdRef.current !== speechId) return;
       speechDebug("speech response", {
-        elapsedMs: Math.round(performance.now() - speechStartedAt),
+        route: speechTiming.route,
+        startedAt: speechTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - speechTiming.startedAt),
+        success: true,
         status: response.status,
         contentType: response.contentType,
         blobSize: response.blob.size,
@@ -579,12 +778,28 @@ function RockyInteraction({
       }
       await playNeuralSpeech(response.blob, controller, speechId);
     } catch (e: unknown) {
-      if (controller.signal.aborted || speechIdRef.current !== speechId) return;
-      speechDebug("neural playback failed", {
+      if (controller.signal.aborted || speechIdRef.current !== speechId) {
+        speechDebug("speech request failed", {
+          route: speechTiming.route,
+          startedAt: speechTiming.startedAtIso,
+          elapsedMs: Math.round(monotonicNow() - speechTiming.startedAt),
+          success: false,
+          reason: requestFailureReason(e, controller.signal),
+          aborted: controller.signal.aborted,
+        });
+        return;
+      }
+      speechDebug("speech request failed", {
+        route: speechTiming.route,
+        startedAt: speechTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - speechTiming.startedAt),
+        success: false,
+        reason: requestFailureReason(e, controller.signal),
+        aborted: controller.signal.aborted,
         name: e instanceof Error ? e.name : typeof e,
         message: e instanceof Error ? e.message : String(e),
       });
-      stopRockySpeech();
+      stopRockySpeech({ releasePlaybackContext: true });
       const browserSpeechId = speechIdRef.current;
       const browserResult = await speakBrowser(reply, language || "en", browserSpeechId);
       if (browserResult === "started") {
@@ -638,8 +853,11 @@ function RockyInteraction({
     locationContext?: DeviceLocationContext | null,
   ) => {
     setInteractionState("thinking");
-    const conversationStartedAt = performance.now();
-    speechDebug("conversation request started");
+    const conversationTiming = requestTimingStarted("/conversation");
+    speechDebug("conversation request started", {
+      route: conversationTiming.route,
+      startedAt: conversationTiming.startedAtIso,
+    });
     try {
       const result = await sendConversation({
         message: text,
@@ -649,7 +867,10 @@ function RockyInteraction({
       }, controller.signal);
       if (!isCurrentTurn(id, controller)) return;
       speechDebug("conversation response", {
-        elapsedMs: Math.round(performance.now() - conversationStartedAt),
+        route: conversationTiming.route,
+        startedAt: conversationTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - conversationTiming.startedAt),
+        success: true,
       });
       setResponse(result);
       setInteractionState("idle");
@@ -665,7 +886,29 @@ function RockyInteraction({
       finishTurn(id, controller);
       void speak(result.reply, result.language);
     } catch (e: unknown) {
-      if (!isCurrentTurn(id, controller)) return;
+      if (!isCurrentTurn(id, controller)) {
+        if (controller.signal.aborted) {
+          speechDebug("conversation request failed", {
+            route: conversationTiming.route,
+            startedAt: conversationTiming.startedAtIso,
+            elapsedMs: Math.round(monotonicNow() - conversationTiming.startedAt),
+            success: false,
+            reason: requestFailureReason(e, controller.signal),
+            aborted: controller.signal.aborted,
+          });
+        }
+        return;
+      }
+      speechDebug("conversation request failed", {
+        route: conversationTiming.route,
+        startedAt: conversationTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - conversationTiming.startedAt),
+        success: false,
+        reason: requestFailureReason(e, controller.signal),
+        aborted: controller.signal.aborted,
+        name: e instanceof Error ? e.name : typeof e,
+        message: e instanceof Error ? e.message : String(e),
+      });
       if (e instanceof AuthExpiredError) {
         setError("Your session expired. Please sign in again.");
       } else {
@@ -708,15 +951,22 @@ function RockyInteraction({
   const submitTranscription = async (audio: Blob, filename: string) => {
     const turn = beginTurn();
     if (!turn) return;
+    const transcriptionTiming = requestTimingStarted("/transcribe");
     try {
       setInteractionState("transcribing");
       setVoiceError(null);
-      const transcriptionStartedAt = performance.now();
-      speechDebug("transcription request started", { blobSize: audio.size });
+      speechDebug("transcription request started", {
+        route: transcriptionTiming.route,
+        startedAt: transcriptionTiming.startedAtIso,
+        blobSize: audio.size,
+      });
       const result = await transcribeAudio(audio, filename, turn.controller.signal);
       if (!isCurrentTurn(turn.id, turn.controller)) return;
       speechDebug("transcription response", {
-        elapsedMs: Math.round(performance.now() - transcriptionStartedAt),
+        route: transcriptionTiming.route,
+        startedAt: transcriptionTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - transcriptionTiming.startedAt),
+        success: true,
       });
       const text = result.text.trim();
       if (!text) {
@@ -736,7 +986,29 @@ function RockyInteraction({
       }
       await runConversation(text, turn.id, turn.controller, result.language, locationContext);
     } catch (e: unknown) {
-      if (!isCurrentTurn(turn.id, turn.controller)) return;
+      if (!isCurrentTurn(turn.id, turn.controller)) {
+        if (turn.controller.signal.aborted) {
+          speechDebug("transcription request failed", {
+            route: transcriptionTiming.route,
+            startedAt: transcriptionTiming.startedAtIso,
+            elapsedMs: Math.round(monotonicNow() - transcriptionTiming.startedAt),
+            success: false,
+            reason: requestFailureReason(e, turn.controller.signal),
+            aborted: turn.controller.signal.aborted,
+          });
+        }
+        return;
+      }
+      speechDebug("transcription request failed", {
+        route: transcriptionTiming.route,
+        startedAt: transcriptionTiming.startedAtIso,
+        elapsedMs: Math.round(monotonicNow() - transcriptionTiming.startedAt),
+        success: false,
+        reason: requestFailureReason(e, turn.controller.signal),
+        aborted: turn.controller.signal.aborted,
+        name: e instanceof Error ? e.name : typeof e,
+        message: e instanceof Error ? e.message : String(e),
+      });
       if (e instanceof AuthExpiredError) {
         setError("Your session expired. Please sign in again.");
       } else if (e instanceof ApiError) {
@@ -755,12 +1027,14 @@ function RockyInteraction({
     if (recorder?.state === "recording") {
       const now = performance.now();
       recordingStopRequestedAtRef.current = now;
+      recordingStopReasonRef.current = reason;
       voiceRoundTripStartedAtRef.current = now;
       speechDebug("recording stop requested", {
+        recordingSessionId: recordingSessionIdRef.current,
         reason,
-        silenceMs: silenceStartedAtRef.current === null
+        silenceMs: voiceActivityRef.current.silenceStartedAt === null
           ? undefined
-          : Math.round(now - silenceStartedAtRef.current),
+          : Math.round(now - voiceActivityRef.current.silenceStartedAt),
       });
       recorder.stop();
     }
@@ -785,30 +1059,210 @@ function RockyInteraction({
     voiceAnalyserRef.current = analyser;
     analyser.fftSize = 1024;
     source.connect(analyser);
+    speechDebug("voice detection started", {
+      recordingSessionId: recordingSessionIdRef.current,
+      contextState: context.state,
+      fftSize: analyser.fftSize,
+      sampleRate: context.sampleRate,
+      streamId: stream.id,
+    });
 
     const samples = new Uint8Array(analyser.fftSize);
+    const logAnalyserDiagnostic = () => {
+      analyser.getByteTimeDomainData(samples);
+      const rawSignal = rawSignalStatsFromByteTimeDomain(samples);
+      const level = rawSignal.rms;
+      const now = performance.now();
+      recordingDiagnosticsRef.current.analyserMinRms = Math.min(
+        recordingDiagnosticsRef.current.analyserMinRms,
+        level,
+      );
+      recordingDiagnosticsRef.current.analyserMaxRms = Math.max(
+        recordingDiagnosticsRef.current.analyserMaxRms,
+        level,
+      );
+      recordingDiagnosticsRef.current.maxAbsoluteSample = Math.max(
+        recordingDiagnosticsRef.current.maxAbsoluteSample,
+        rawSignal.maxAbsoluteSample,
+      );
+      const inspection = inspectVoiceActivityLevel(
+        voiceActivityRef.current,
+        level,
+        now,
+        recordingStartedAtRef.current,
+      );
+      speechDiagnostic("analyser rms", {
+        recordingSessionId: recordingSessionIdRef.current,
+        elapsedMs: Math.round(now - recordingStartedAtRef.current),
+        currentRms: roundedAudioLevel(inspection.level),
+        nonZeroSampleCount: rawSignal.nonZeroSampleCount,
+        maxAbsoluteSample: roundedAudioLevel(rawSignal.maxAbsoluteSample),
+        rawSignalRms: roundedAudioLevel(rawSignal.rms),
+        zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+        rollingMin: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+          ? roundedAudioLevel(recordingDiagnosticsRef.current.analyserMinRms)
+          : null,
+        rollingMax: roundedAudioLevel(recordingDiagnosticsRef.current.analyserMaxRms),
+        ambientLevel: roundedAudioLevel(inspection.ambientLevel),
+        speechStartThreshold: roundedAudioLevel(inspection.speechStartThreshold),
+        silenceThreshold: roundedAudioLevel(inspection.silenceThreshold),
+        speechDetected: inspection.speechDetected,
+        peakRms: roundedAudioLevel(voiceActivityRef.current.peakLevel),
+        aggregateMaxAbsoluteSample: roundedAudioLevel(
+          recordingDiagnosticsRef.current.maxAbsoluteSample,
+        ),
+        peakElapsedMs: voiceActivityRef.current.peakElapsedMs === null
+          ? null
+          : Math.round(voiceActivityRef.current.peakElapsedMs),
+        speechStartThresholdAtPeak: voiceActivityRef.current.speechStartThresholdAtPeak === null
+          ? null
+          : roundedAudioLevel(voiceActivityRef.current.speechStartThresholdAtPeak),
+        audioContextState: context.state,
+        detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+      });
+    };
+    if (SPEECH_DIAGNOSTICS) {
+      logAnalyserDiagnostic();
+      voiceDiagnosticTimerRef.current = window.setInterval(logAnalyserDiagnostic, 500);
+    }
+
     const tick = () => {
       if (recorder.state !== "recording") return;
       analyser.getByteTimeDomainData(samples);
-      let sum = 0;
-      for (const sample of samples) {
-        const centered = (sample - 128) / 128;
-        sum += centered * centered;
-      }
-      const level = Math.sqrt(sum / samples.length);
+      const rawSignal = rawSignalStatsFromByteTimeDomain(samples);
+      const level = rawSignal.rms;
       const now = performance.now();
-      if (level >= SPEECH_LEVEL_THRESHOLD) {
-        speechDetectedRef.current = true;
-        silenceStartedAtRef.current = null;
-      } else if (
-        speechDetectedRef.current
-        && now - recordingStartedAtRef.current >= MIN_RECORDING_MS
+      const elapsedMs = now - recordingStartedAtRef.current;
+      recordingDiagnosticsRef.current.detectorFrameCount += 1;
+      if (rawSignal.nonZeroSampleCount === 0) {
+        recordingDiagnosticsRef.current.zeroSignalFrameCount += 1;
+      }
+      recordingDiagnosticsRef.current.analyserMinRms = Math.min(
+        recordingDiagnosticsRef.current.analyserMinRms,
+        level,
+      );
+      recordingDiagnosticsRef.current.analyserMaxRms = Math.max(
+        recordingDiagnosticsRef.current.analyserMaxRms,
+        level,
+      );
+      recordingDiagnosticsRef.current.maxAbsoluteSample = Math.max(
+        recordingDiagnosticsRef.current.maxAbsoluteSample,
+        rawSignal.maxAbsoluteSample,
+      );
+      const wasSpeechDetected = voiceActivityRef.current.speechDetected;
+      const hadSilenceStarted = voiceActivityRef.current.silenceStartedAt !== null;
+      const decision = evaluateVoiceActivityLevel(
+        voiceActivityRef.current,
+        level,
+        now,
+        recordingStartedAtRef.current,
+      );
+      const degenerateNativeCapture = recordingStopReasonRef.current !== "manual"
+        && isDegenerateNativeCapture({
+          nativePlatform: isNativeSpeechCapture(),
+          elapsedMs,
+          detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+          zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+          peakRms: voiceActivityRef.current.peakLevel,
+          minObservationMs: DEGENERATE_CAPTURE_REJECT_MS,
+          minDetectorFrames: DEGENERATE_CAPTURE_REJECT_MIN_FRAMES,
+          zeroFrameRatio: DEGENERATE_CAPTURE_ZERO_FRAME_RATIO,
+          maxWeakPeakRms: DEGENERATE_CAPTURE_MAX_PEAK_RMS,
+        });
+      if (
+        recordingStopReasonRef.current !== "manual"
+        && (
+          shouldReacquireSilentNativeCapture({
+            nativePlatform: isNativeSpeechCapture(),
+            speechDetected: decision.speechDetected,
+            elapsedMs,
+            detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+            zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+            peakRms: voiceActivityRef.current.peakLevel,
+            reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+            minObservationMs: SILENT_CAPTURE_REACQUIRE_MS,
+            minDetectorFrames: SILENT_CAPTURE_REACQUIRE_MIN_FRAMES,
+            zeroFrameRatio: SILENT_CAPTURE_REACQUIRE_ZERO_FRAME_RATIO,
+            maxReacquireAttempts: MAX_SILENT_CAPTURE_REACQUIRE_ATTEMPTS,
+          })
+          || (
+            degenerateNativeCapture
+            && silentCaptureReacquireAttemptsRef.current
+              < MAX_SILENT_CAPTURE_REACQUIRE_ATTEMPTS
+          )
+        )
       ) {
-        silenceStartedAtRef.current ??= now;
-        if (now - silenceStartedAtRef.current >= SILENCE_STOP_MS) {
-          stopActiveRecorder("silence");
-          return;
-        }
+        const zeroSignalRatio = recordingDiagnosticsRef.current.zeroSignalFrameCount
+          / recordingDiagnosticsRef.current.detectorFrameCount;
+        silentCaptureReacquireAttemptsRef.current += 1;
+        speechDiagnostic("silent capture reacquire requested", {
+          recordingSessionId: recordingSessionIdRef.current,
+          elapsedMs: Math.round(elapsedMs),
+          detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+          zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+          zeroSignalRatio: Number(zeroSignalRatio.toFixed(3)),
+          peakRms: roundedAudioLevel(voiceActivityRef.current.peakLevel),
+          maxAbsoluteSample: roundedAudioLevel(rawSignal.maxAbsoluteSample),
+          aggregateMaxAbsoluteSample: roundedAudioLevel(
+            recordingDiagnosticsRef.current.maxAbsoluteSample,
+          ),
+          reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+        });
+        stopActiveRecorder(CAPTURE_REACQUIRE_STOP_REASON);
+        return;
+      }
+      if (recordingStopReasonRef.current !== "manual" && shouldStopExhaustedNativeCaptureRecovery({
+        nativePlatform: isNativeSpeechCapture(),
+        elapsedMs,
+        detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+        zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+        peakRms: voiceActivityRef.current.peakLevel,
+        reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+        minObservationMs: DEGENERATE_CAPTURE_REJECT_MS,
+        minDetectorFrames: DEGENERATE_CAPTURE_REJECT_MIN_FRAMES,
+        zeroFrameRatio: DEGENERATE_CAPTURE_ZERO_FRAME_RATIO,
+        maxWeakPeakRms: DEGENERATE_CAPTURE_MAX_PEAK_RMS,
+        maxReacquireAttempts: MAX_SILENT_CAPTURE_REACQUIRE_ATTEMPTS,
+      })) {
+        const zeroSignalRatio = recordingDiagnosticsRef.current.zeroSignalFrameCount
+          / recordingDiagnosticsRef.current.detectorFrameCount;
+        speechDiagnostic("capture recovery exhausted", {
+          recordingSessionId: recordingSessionIdRef.current,
+          reacquireAttempt: true,
+          reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+          elapsedMs: Math.round(elapsedMs),
+          detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+          zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+          zeroSignalRatio: Number(zeroSignalRatio.toFixed(3)),
+          peakRms: roundedAudioLevel(voiceActivityRef.current.peakLevel),
+          aggregateMaxAbsoluteSample: roundedAudioLevel(
+            recordingDiagnosticsRef.current.maxAbsoluteSample,
+          ),
+        });
+        stopActiveRecorder(CAPTURE_RECOVERY_EXHAUSTED_STOP_REASON);
+        return;
+      }
+      if (!wasSpeechDetected && decision.speechDetected) {
+        speechDebug("speech detected", {
+          ambientLevel: decision.ambientLevel,
+          level: decision.level,
+          speechStartThreshold: decision.speechStartThreshold,
+        });
+      } else if (!hadSilenceStarted && decision.silenceStartedAt !== null) {
+        speechDebug("silence timer started", {
+          ambientLevel: decision.ambientLevel,
+          level: decision.level,
+          silenceThreshold: decision.silenceThreshold,
+        });
+      } else if (hadSilenceStarted && decision.silenceStartedAt === null) {
+        speechDebug("silence timer reset", {
+          level: decision.level,
+          silenceThreshold: decision.silenceThreshold,
+        });
+      }
+      if (decision.shouldStop) {
+        stopActiveRecorder("silence");
+        return;
       }
       voiceFrameRef.current = window.requestAnimationFrame(tick);
     };
@@ -838,87 +1292,362 @@ function RockyInteraction({
     event.currentTarget.form?.requestSubmit();
   };
 
-  const startListening = async () => {
+  const startRecordingCapture = async (reacquireAttempt: boolean) => {
     if (
       turnLockedRef.current
       || recordingStartingRef.current
       || mediaRecorderRef.current?.state === "recording"
       || recognitionRef.current
     ) return;
+    if (!reacquireAttempt) {
+      silentCaptureReacquireAttemptsRef.current = 0;
+    }
+    recordingSessionIdRef.current += 1;
+    const recordingSessionId = recordingSessionIdRef.current;
     recordingStartingRef.current = true;
     setMicStarting(true);
-    unlockAudioPlayback();
-    stopRockySpeech();
+    speechDiagnostic("recording session starting", {
+      recordingSessionId,
+      reacquireAttempt,
+      silentCaptureReacquireAttempts: silentCaptureReacquireAttemptsRef.current,
+      stalePlaybackContextState: audioContextRef.current?.state ?? null,
+      staleCaptureStreamActive: mediaStreamRef.current?.active ?? null,
+      staleRecorderState: mediaRecorderRef.current?.state ?? null,
+    });
+    stopRockySpeech({ releasePlaybackContext: true });
+    cleanupRecording();
     if (recordingSupported) {
       let stream: MediaStream | null = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioConstraints = recordingAudioConstraints(SPEECH_DISABLE_AUDIO_PROCESSING);
+        speechDiagnostic("get user media requested", {
+          recordingSessionId,
+          disableAudioProcessing: SPEECH_DISABLE_AUDIO_PROCESSING,
+          constraints: audioConstraints,
+        });
+        stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
         if (!lifecycleActiveRef.current) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-        mediaStreamRef.current = stream;
+        const activeStream = stream;
+        mediaStreamRef.current = activeStream;
+        void logAudioInputDevices(recordingSessionId);
+        const audioTrack = activeStream.getAudioTracks()[0];
+        const trackSettings = audioTrack?.getSettings() as Record<string, unknown> | undefined;
+        const trackCapabilities = audioTrack?.getCapabilities?.() as Record<string, unknown> | undefined;
+        speechDiagnostic("media stream track settings", {
+          recordingSessionId,
+          streamId: activeStream.id,
+          streamActive: activeStream.active,
+          trackId: audioTrack?.id,
+          trackSettings,
+          trackCapabilities,
+          sampleRate: trackSettings?.sampleRate,
+          channelCount: trackSettings?.channelCount,
+          deviceId: trackSettings?.deviceId,
+          echoCancellation: trackSettings?.echoCancellation,
+          noiseSuppression: trackSettings?.noiseSuppression,
+          autoGainControl: trackSettings?.autoGainControl,
+          label: audioTrack?.label,
+          readyState: audioTrack?.readyState,
+          muted: audioTrack?.muted,
+          enabled: audioTrack?.enabled,
+        });
+        audioTrack?.addEventListener("mute", () => {
+          speechDiagnostic("media stream track event", {
+            recordingSessionId,
+            event: "mute",
+            streamId: activeStream.id,
+            streamActive: activeStream.active,
+            trackId: audioTrack.id,
+            readyState: audioTrack.readyState,
+            enabled: audioTrack.enabled,
+            muted: audioTrack.muted,
+          });
+        });
+        audioTrack?.addEventListener("unmute", () => {
+          speechDiagnostic("media stream track event", {
+            recordingSessionId,
+            event: "unmute",
+            streamId: activeStream.id,
+            streamActive: activeStream.active,
+            trackId: audioTrack.id,
+            readyState: audioTrack.readyState,
+            enabled: audioTrack.enabled,
+            muted: audioTrack.muted,
+          });
+        });
+        audioTrack?.addEventListener("ended", () => {
+          speechDiagnostic("media stream track event", {
+            recordingSessionId,
+            event: "ended",
+            streamId: activeStream.id,
+            streamActive: activeStream.active,
+            trackId: audioTrack.id,
+            readyState: audioTrack.readyState,
+            enabled: audioTrack.enabled,
+            muted: audioTrack.muted,
+          });
+        });
         const mimeType = recordingMimeType();
         let recorder: MediaRecorder;
         try {
-          recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+          recorder = new MediaRecorder(activeStream, mimeType ? { mimeType } : undefined);
         } catch (error) {
+          speechDiagnostic("media recorder mime fallback", {
+            requestedMimeType: mimeType,
+            name: error instanceof Error ? error.name : typeof error,
+            message: error instanceof Error ? error.message : String(error),
+          });
           if (!mimeType) throw error;
-          recorder = new MediaRecorder(stream);
+          recorder = new MediaRecorder(activeStream);
         }
         audioChunksRef.current = [];
+        recordingDiagnosticsRef.current = {
+          analyserMinRms: Number.POSITIVE_INFINITY,
+          analyserMaxRms: 0,
+          maxAbsoluteSample: 0,
+          chunkSizes: [],
+          detectorFrameCount: 0,
+          zeroSignalFrameCount: 0,
+        };
         mediaRecorderRef.current = recorder;
-        recordingStartedAtRef.current = performance.now();
+        recordingStartedAtRef.current = monotonicNow();
         recordingStopRequestedAtRef.current = null;
+        recordingStopReasonRef.current = null;
         voiceRoundTripStartedAtRef.current = null;
-        speechDetectedRef.current = false;
-        silenceStartedAtRef.current = null;
+        voiceActivityRef.current = initialVoiceActivityState();
+        speechDiagnostic("media recorder created", {
+          recordingSessionId,
+          selectedMimeType: recorder.mimeType || mimeType,
+          requestedMimeType: mimeType,
+          state: recorder.state,
+        });
 
         recorder.ondataavailable = (event) => {
           if (event.data.size > 0) {
             audioChunksRef.current.push(event.data);
           }
+          recordingDiagnosticsRef.current.chunkSizes.push(event.data.size);
+          speechDiagnostic("media recorder chunk", {
+            recordingSessionId,
+            state: recorder.state,
+            chunkCount: recordingDiagnosticsRef.current.chunkSizes.length,
+            chunkBytes: event.data.size,
+          });
         };
         recorder.onerror = () => {
           recorder.onstop = null;
+          speechDiagnostic("media recorder error", {
+            recordingSessionId,
+            state: recorder.state,
+            chunkCount: recordingDiagnosticsRef.current.chunkSizes.length,
+            chunkSizes: recordingDiagnosticsRef.current.chunkSizes,
+          });
           setVoiceError("Recording failed.");
-          audioChunksRef.current = [];
-          recordingStartingRef.current = false;
-          setListening(false);
-          setInteractionState("idle");
-          cleanupRecording();
+          resetRecordingTerminalState();
         };
         recorder.onstop = () => {
           const blobReadyAt = performance.now();
           const chunks = audioChunksRef.current;
           const duration = blobReadyAt - recordingStartedAtRef.current;
-          const speechDetected = speechDetectedRef.current;
-          audioChunksRef.current = [];
-          setListening(false);
-          cleanupRecording();
+          const speechDetected = voiceActivityRef.current.speechDetected;
+          const type = recorder.mimeType || mimeType || "audio/webm";
+          const stopReason = recordingStopReasonRef.current ?? "recorder-ended";
+          const audio = new Blob(chunks, { type });
           speechDebug("recording blob ready", {
+            recordingSessionId,
+            reason: stopReason,
             stopToBlobMs: recordingStopRequestedAtRef.current === null
               ? undefined
               : Math.round(blobReadyAt - recordingStopRequestedAtRef.current),
             recordingMs: Math.round(duration),
           });
-          if (!speechDetected || duration < MIN_RECORDING_MS || chunks.length === 0) {
-            setVoiceError("I couldn't hear anything to send.");
-            setInteractionState("idle");
+          speechDiagnostic("media recorder final blob", {
+            recordingSessionId,
+            selectedMimeType: type,
+            mime: type,
+            state: recorder.state,
+            stopReason,
+            chunkCount: recordingDiagnosticsRef.current.chunkSizes.length,
+            chunkSizes: recordingDiagnosticsRef.current.chunkSizes,
+            finalBlobSize: audio.size,
+            totalBlobSize: audio.size,
+            detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+            zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+            recordingMs: Math.round(duration),
+            recordingDurationMs: Math.round(duration),
+            analyserMinRms: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+              ? Number(recordingDiagnosticsRef.current.analyserMinRms.toFixed(6))
+              : null,
+            analyserMaxRms: Number(recordingDiagnosticsRef.current.analyserMaxRms.toFixed(6)),
+            aggregateMaxAbsoluteSample: Number(
+              recordingDiagnosticsRef.current.maxAbsoluteSample.toFixed(6),
+            ),
+            rollingRmsMin: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+              ? roundedAudioLevel(recordingDiagnosticsRef.current.analyserMinRms)
+              : null,
+            rollingRmsMax: roundedAudioLevel(recordingDiagnosticsRef.current.analyserMaxRms),
+            ambientBaseline: voiceActivityRef.current.ambientLevel === null
+              ? null
+              : Number(voiceActivityRef.current.ambientLevel.toFixed(6)),
+            peakRms: Number(voiceActivityRef.current.peakLevel.toFixed(6)),
+            peakElapsedMs: voiceActivityRef.current.peakElapsedMs === null
+              ? null
+              : Math.round(voiceActivityRef.current.peakElapsedMs),
+            speechStartThresholdAtPeak: voiceActivityRef.current.speechStartThresholdAtPeak === null
+              ? null
+              : Number(voiceActivityRef.current.speechStartThresholdAtPeak.toFixed(6)),
+            speechDetected,
+          });
+          if (stopReason === CAPTURE_REACQUIRE_STOP_REASON) {
+            reacquireRecordingCapture(recordingSessionId);
             return;
           }
-          const type = recorder.mimeType || mimeType || "audio/webm";
-          const audio = new Blob(chunks, { type });
-          if (audio.size === 0) {
-            setVoiceError("I couldn't hear anything to send.");
-            setInteractionState("idle");
+          if (stopReason === CAPTURE_RECOVERY_EXHAUSTED_STOP_REASON) {
+            speechDiagnostic("recording terminal state", {
+              recordingSessionId,
+              ...terminalRecordingRuntimeState("rejected"),
+            });
+            setVoiceError("I couldn't get a clean microphone signal. Please try again.");
+            resetRecordingTerminalState();
             return;
           }
+          const zeroSignalRatio = recordingDiagnosticsRef.current.detectorFrameCount === 0
+            ? 0
+            : recordingDiagnosticsRef.current.zeroSignalFrameCount
+              / recordingDiagnosticsRef.current.detectorFrameCount;
+          const degenerateNativeCapture = stopReason !== "manual" && isDegenerateNativeCapture({
+            nativePlatform: isNativeSpeechCapture(),
+            elapsedMs: duration,
+            detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+            zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+            peakRms: voiceActivityRef.current.peakLevel,
+            minObservationMs: DEGENERATE_CAPTURE_REJECT_MS,
+            minDetectorFrames: DEGENERATE_CAPTURE_REJECT_MIN_FRAMES,
+            zeroFrameRatio: DEGENERATE_CAPTURE_ZERO_FRAME_RATIO,
+            maxWeakPeakRms: DEGENERATE_CAPTURE_MAX_PEAK_RMS,
+          });
+          if (degenerateNativeCapture && shouldRejectDegenerateNativeCapture({
+            nativePlatform: isNativeSpeechCapture(),
+            elapsedMs: duration,
+            detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+            zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+            peakRms: voiceActivityRef.current.peakLevel,
+            reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+            minObservationMs: DEGENERATE_CAPTURE_REJECT_MS,
+            minDetectorFrames: DEGENERATE_CAPTURE_REJECT_MIN_FRAMES,
+            zeroFrameRatio: DEGENERATE_CAPTURE_ZERO_FRAME_RATIO,
+            maxWeakPeakRms: DEGENERATE_CAPTURE_MAX_PEAK_RMS,
+            maxReacquireAttempts: MAX_SILENT_CAPTURE_REACQUIRE_ATTEMPTS,
+          })) {
+            silentCaptureReacquireAttemptsRef.current += 1;
+            speechDiagnostic("degenerate capture rejected", {
+              recordingSessionId,
+              detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+              zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+              zeroSignalRatio: Number(zeroSignalRatio.toFixed(3)),
+              peakRms: Number(voiceActivityRef.current.peakLevel.toFixed(6)),
+              analyserMinRms: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+                ? Number(recordingDiagnosticsRef.current.analyserMinRms.toFixed(6))
+                : null,
+              analyserMaxRms: Number(recordingDiagnosticsRef.current.analyserMaxRms.toFixed(6)),
+              aggregateMaxAbsoluteSample: Number(
+                recordingDiagnosticsRef.current.maxAbsoluteSample.toFixed(6),
+              ),
+              blobSize: audio.size,
+              stopReason,
+              reacquireAttempt,
+              nextReacquireAttempt: true,
+              reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+            });
+            reacquireRecordingCapture(recordingSessionId);
+            return;
+          }
+          if (degenerateNativeCapture) {
+            speechDiagnostic("degenerate capture rejected", {
+              recordingSessionId,
+              detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+              zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+              zeroSignalRatio: Number(zeroSignalRatio.toFixed(3)),
+              peakRms: Number(voiceActivityRef.current.peakLevel.toFixed(6)),
+              analyserMinRms: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+                ? Number(recordingDiagnosticsRef.current.analyserMinRms.toFixed(6))
+                : null,
+              analyserMaxRms: Number(recordingDiagnosticsRef.current.analyserMaxRms.toFixed(6)),
+              aggregateMaxAbsoluteSample: Number(
+                recordingDiagnosticsRef.current.maxAbsoluteSample.toFixed(6),
+              ),
+              blobSize: audio.size,
+              stopReason,
+              reacquireAttempt,
+              nextReacquireAttempt: false,
+              reacquireAttemptCount: silentCaptureReacquireAttemptsRef.current,
+            });
+            speechDiagnostic("recording terminal state", {
+              recordingSessionId,
+              ...terminalRecordingRuntimeState("rejected"),
+            });
+            setVoiceError("I couldn't get a clean microphone signal. Please try again.");
+            resetRecordingTerminalState();
+            return;
+          }
+          const validation = validateRecordingForTranscription({
+            speechDetected,
+            durationMs: duration,
+            minRecordingMs: MIN_RECORDING_MS,
+            chunkCount: chunks.length,
+            blobSize: audio.size,
+          });
+          if (!validation.accepted) {
+            speechDiagnostic("recording rejected", {
+              recordingSessionId,
+              reason: validation.reason,
+              stopReason,
+              recordingMs: Math.round(duration),
+              minRecordingMs: MIN_RECORDING_MS,
+              chunkCount: chunks.length,
+              chunkSizes: recordingDiagnosticsRef.current.chunkSizes,
+              finalBlobSize: audio.size,
+              detectorFrameCount: recordingDiagnosticsRef.current.detectorFrameCount,
+              zeroSignalFrameCount: recordingDiagnosticsRef.current.zeroSignalFrameCount,
+              analyserMinRms: Number.isFinite(recordingDiagnosticsRef.current.analyserMinRms)
+                ? Number(recordingDiagnosticsRef.current.analyserMinRms.toFixed(6))
+                : null,
+              analyserMaxRms: Number(recordingDiagnosticsRef.current.analyserMaxRms.toFixed(6)),
+              aggregateMaxAbsoluteSample: Number(
+                recordingDiagnosticsRef.current.maxAbsoluteSample.toFixed(6),
+              ),
+              ambientBaseline: voiceActivityRef.current.ambientLevel === null
+                ? null
+                : Number(voiceActivityRef.current.ambientLevel.toFixed(6)),
+              peakRms: Number(voiceActivityRef.current.peakLevel.toFixed(6)),
+              peakElapsedMs: voiceActivityRef.current.peakElapsedMs === null
+                ? null
+                : Math.round(voiceActivityRef.current.peakElapsedMs),
+              speechStartThresholdAtPeak: voiceActivityRef.current.speechStartThresholdAtPeak === null
+                ? null
+                : Number(voiceActivityRef.current.speechStartThresholdAtPeak.toFixed(6)),
+            });
+            speechDiagnostic("recording terminal state", {
+              recordingSessionId,
+              ...terminalRecordingRuntimeState("rejected"),
+            });
+            setVoiceError("I couldn't hear anything to send.");
+            resetRecordingTerminalState();
+            return;
+          }
+          speechDiagnostic("recording terminal state", {
+            recordingSessionId,
+            ...terminalRecordingRuntimeState("accepted"),
+          });
+          resetRecordingTerminalState();
           void submitTranscription(audio, recordingFilename(type));
         };
         recorder.start();
         recordingStartingRef.current = false;
-        void startSilenceDetection(stream, recorder).catch(() => {
+        void startSilenceDetection(activeStream, recorder).catch(() => {
           maxRecordingTimerRef.current = window.setTimeout(
             () => stopActiveRecorder("max-duration"),
             MAX_RECORDING_MS,
@@ -988,6 +1717,10 @@ function RockyInteraction({
     }
   };
 
+  const startListening = () => {
+    void startRecordingCapture(false);
+  };
+
   const stopListening = () => {
     if (mediaRecorderRef.current?.state === "recording") {
       stopActiveRecorder("manual");
@@ -1001,6 +1734,7 @@ function RockyInteraction({
 
   return (
     <section className="rocky-hero" aria-label="Rocky interaction">
+      <div className={`rocky-presence-orbit ${visualState}`} aria-hidden="true"><i /><i /><i /></div>
       <div className="rocky-prompt">
         <p className="mission-eyebrow">Mission Control</p>
         <h1 className="rocky-title">{name ? `${greeting()}, ${name}` : greeting()}</h1>
@@ -1072,11 +1806,16 @@ function RockyInteraction({
       </form>
 
       <div className="rocky-state" aria-live="polite">
-        <span className={`rocky-state-dot ${interactionState}`} aria-hidden="true" />
-        <strong>{currentState.label}</strong>
+        <span className={`rocky-state-dot ${visualState}`} aria-hidden="true" />
+        <strong>{visualState === "error" ? "Needs attention" : currentState.label}</strong>
         <span id="rocky-status-detail">{currentState.detail}</span>
+        <span className={`rocky-signal ${visualState}`} aria-hidden="true"><i /><i /><i /><i /><i /></span>
         {interactionState === "speaking" && (
-          <button className="rocky-stop" type="button" onClick={stopRockySpeech}>
+          <button
+            className="rocky-stop"
+            type="button"
+            onClick={() => stopRockySpeech({ releasePlaybackContext: true })}
+          >
             Stop speaking
           </button>
         )}
@@ -1103,7 +1842,7 @@ function RockyInteraction({
               } catch {
                 /* preference persistence is best-effort */
               }
-              if (!event.target.checked) stopRockySpeech();
+              if (!event.target.checked) stopRockySpeech({ releasePlaybackContext: true });
             }}
           />
           <svg aria-hidden="true" viewBox="0 0 24 24">

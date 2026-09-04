@@ -2428,9 +2428,26 @@ a, button { -webkit-tap-highlight-color: transparent; }
 .rocky-input { color: #e9e8e4; font-size: 15px; }
 .rocky-action { min-width: 48px; min-height: 48px; border-radius: 7px; background: #e8e6e0; color: #151517; }
 .rocky-action:hover:not(:disabled) { background: #fff; transform: translateY(-1px); }
+.rocky-action[aria-pressed="true"] { background: #7770a7; color: white; }
+.rocky-state { position: relative; z-index: 2; max-width: 830px; margin-top: 13px; color: #777570; }
+.rocky-state strong { color: #aaa7a0; font-weight: 540; }
+.rocky-state-dot { background: #67646f; }
+.rocky-state-dot.listening, .rocky-state-dot.transcribing, .rocky-state-dot.thinking, .rocky-state-dot.speaking { background: #9189c5; box-shadow: 0 0 0 5px rgba(119,112,167,.1); }
+.rocky-state-dot.error { background: #d48787; }
+.rocky-signal { display: inline-flex; height: 15px; align-items: center; gap: 3px; margin-left: auto; opacity: .26; }
+.rocky-signal i { width: 1px; height: 12px; background: #aaa4d1; transform: scaleY(.2); }
+.rocky-signal.listening, .rocky-signal.transcribing, .rocky-signal.thinking, .rocky-signal.speaking { opacity: .8; }
+.rocky-signal.error i { background: #d48787; }
+.rocky-options { max-width: 830px; }
+.rocky-audio-toggle { border: 0; background: transparent; color: #6f6d69; }
 .rocky-latest { position: relative; z-index: 2; max-width: 830px; margin-top: 29px; padding: 22px 0 2px 46px; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
 .rocky-latest-label { color: #8d86ba; }
 .rocky-latest-reply { max-width: 720px; color: #d5d3ce; font-size: 16px; line-height: 1.65; }
+.rocky-presence-orbit { position: absolute; z-index: 0; top: 45px; right: 7%; width: 132px; height: 132px; opacity: .42; }
+.rocky-presence-orbit i { position: absolute; border: 1px solid rgba(139,132,189,.25); border-radius: 48% 52% 56% 44%; }
+.rocky-presence-orbit i:nth-child(1) { inset: 0; transform: rotate(18deg); }
+.rocky-presence-orbit i:nth-child(2) { inset: 17px; transform: rotate(68deg); }
+.rocky-presence-orbit i:nth-child(3) { inset: 38px; background: rgba(139,132,189,.4); box-shadow: 0 0 30px rgba(119,112,167,.2); }
 
 .mc-dashboard { grid-template-columns: minmax(0, 1.4fr) minmax(280px, .8fr); grid-template-areas: "focus resume" "summary summary" "reminders notifications"; gap: 1px 34px; }
 .mc-panel { border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; box-shadow: none; padding: 27px 0 31px; }
@@ -2529,10 +2546,18 @@ a, button { -webkit-tap-highlight-color: transparent; }
 
 @keyframes auth-enter { from { opacity: 0; transform: translateY(18px); } }
 @keyframes quiet-orbit { to { transform: rotate(360deg); } }
+@keyframes rocky-wave { 0%,100% { transform: scaleY(.2); } 45% { transform: scaleY(.85); } 70% { transform: scaleY(.42); } }
 
 @media (prefers-reduced-motion: no-preference) {
   .brand-mark::before { animation: quiet-orbit 46s linear infinite; }
   .brand-mark::after { animation: quiet-orbit 53s linear infinite reverse; }
+  .rocky-presence-orbit.listening i:first-child, .rocky-presence-orbit.thinking i:first-child, .rocky-presence-orbit.speaking i:first-child { animation: quiet-orbit 18s linear infinite; }
+  .rocky-presence-orbit.listening i:nth-child(2), .rocky-presence-orbit.thinking i:nth-child(2), .rocky-presence-orbit.speaking i:nth-child(2) { animation: quiet-orbit 24s linear infinite reverse; }
+  .rocky-signal.listening i, .rocky-signal.transcribing i, .rocky-signal.thinking i, .rocky-signal.speaking i { animation: rocky-wave 2.6s ease-in-out infinite; }
+  .rocky-signal i:nth-child(2) { animation-delay: -.4s; }
+  .rocky-signal i:nth-child(3) { animation-delay: -.9s; }
+  .rocky-signal i:nth-child(4) { animation-delay: -1.3s; }
+  .rocky-signal i:nth-child(5) { animation-delay: -.7s; }
 }
 
 @media (max-width: 960px) {
@@ -2557,6 +2582,8 @@ a, button { -webkit-tap-highlight-color: transparent; }
   .rocky-question { max-width: 84%; font-size: 13px; }
   .rocky-form { margin-top: 40px; }
   .rocky-input-shell { padding-left: 13px; }
+  .rocky-presence-orbit { top: 30px; right: -25px; width: 104px; height: 104px; opacity: .32; }
+  .rocky-state > span:not(.rocky-state-dot):not(.err):not(.rocky-signal) { display: none; }
   .rocky-latest { padding-left: 0; }
   .mc-dashboard { display: block; }
   .mc-focus, .mc-resume { min-height: auto; }
