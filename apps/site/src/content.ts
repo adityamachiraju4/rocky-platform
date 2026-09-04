@@ -38,10 +38,10 @@ export const routes: SiteRoute[] = [
     title: "Rocky OS | Personal Intelligence OS",
     description:
       "Rocky OS brings conversations, voice, projects, tasks, reminders, notes, lists and live context into one personal intelligence system.",
-    eyebrow: "Rocky OS",
-    heading: "Your life deserves its own intelligence.",
+    eyebrow: "Rocky / Personal Intelligence OS",
+    heading: "Everything you’re working on. Still connected.",
     lead:
-      "Rocky is a Personal Intelligence OS designed to keep your context, plans and everyday work moving with continuity and control.",
+      "Rocky brings your conversations, plans and everyday work into one personal system that remembers what matters.",
     sections: [
       {
         title: "More than another chatbot",

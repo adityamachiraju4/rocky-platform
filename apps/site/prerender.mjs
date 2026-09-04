@@ -13,15 +13,16 @@ const routes = [
     title: "Rocky OS | Personal Intelligence OS",
     description:
       "Rocky OS brings conversations, voice, projects, tasks, reminders, notes, lists and live context into one personal intelligence system.",
-    eyebrow: "Rocky OS",
-    heading: "Your life deserves its own intelligence.",
+    eyebrow: "Rocky / Personal Intelligence OS",
+    heading: "Everything you’re working on. Still connected.",
     lead:
-      "Rocky is a Personal Intelligence OS designed to keep your context, plans and everyday work moving with continuity and control.",
+      "Rocky brings your conversations, plans and everyday work into one personal system that remembers what matters.",
     sections: [
-      ["Personal Intelligence OS", "Built for the continuity missing from everyday software."],
-      ["Different by design", "Rocky is closer to an operating layer for your life than a chatbot tab."],
-      ["Capabilities", "Conversations, voice, projects, tasks, reminders, notes, lists, notifications, activity history, memory context and live information tools."],
-      ["Trust and control", "Rocky emphasizes explicit user control, clear status and careful handling of personal context."],
+      ["Not another chatbot", "Rocky carries context forward and connects conversations to plans, reminders and work."],
+      ["Continuity", "Talk. Remember. Plan. Act. Continue."],
+      ["Capabilities", "Remember with context, notes and lists. Organize projects, tasks and reminders. Assist through voice, notifications and live information."],
+      ["Voice", "Say it while you’re thinking it. Rocky supports natural voice interaction with clear listening, thinking and speaking states."],
+      ["Trust by design", "Rocky emphasizes explicit permissions, visible system state, clear data boundaries and user control."],
     ],
   },
   {
@@ -203,37 +204,43 @@ function seoHead(route) {
 
 function prerenderBody(route) {
   const routeLinks = routes
-    .filter((item) => ["/", "/product", "/voice", "/privacy", "/security", "/about", "/download"].includes(item.path))
-    .map((item) => `<a href="${item.path}">${item.path === "/" ? "Home" : item.eyebrow}</a>`)
+    .filter((item) => ["/product", "/voice", "/security", "/about"].includes(item.path))
+    .map((item) => `<a href="${item.path}">${item.eyebrow}</a>`)
     .join("");
   const content = route.sections
     .map(([title, body]) => `<article class="content-block"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p></article>`)
     .join("");
 
-  const heroMedia = route.path === "/"
-    ? `<div class="presence-panel" aria-label="Rocky visual presence"><picture><source srcset="/rocky-presence.webp" type="image/webp" /><source srcset="/rocky-presence-1200.png" type="image/png" /><img src="/rocky-presence-1200.png" alt="Rocky OS abstract luminous presence" width="1200" height="630" /></picture><div class="signal-card"><span>Continuity</span><strong>Context, planning and voice in one system.</strong></div></div>`
-    : "";
+  const brand = `<span class="brand-symbol" aria-hidden="true"><span></span></span><strong>Rocky OS</strong>`;
+  const footer = `<footer class="footer"><div class="footer-brand"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><p>Personal Intelligence OS</p><small>${companyName}</small></div><div class="footer-links"><nav aria-label="Product navigation"><span>Explore</span><a href="/product">Product</a><a href="/voice">Voice</a><a href="/security">Security</a></nav><nav aria-label="Company and legal navigation"><span>Company</span><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><nav aria-label="Support navigation"><span>Support</span><a href="/support">Support</a><a href="/account-deletion">Account deletion</a><a href="/download">Early access</a></nav></div><p class="footer-note">© ${new Date().getFullYear()} Rocky OS</p></footer>`;
+
+  if (route.path === "/") {
+    return `<div class="site-shell"><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><nav class="nav" aria-label="Primary navigation">${routeLinks}</nav><a class="nav-cta" href="/download"><span class="desktop-label">Get early access</span><span class="mobile-label">Early access</span><span aria-hidden="true">↗</span></a></div></header><main id="main">
+      <section class="product-hero"><div class="product-hero-copy"><p class="eyebrow">${escapeHtml(route.eyebrow)}</p><h1>${escapeHtml(route.heading)}</h1><p class="lead">${escapeHtml(route.lead)}</p><div class="hero-actions"><a class="button primary" href="/download">Get early access <span aria-hidden="true">↗</span></a><a class="text-action" href="#how-rocky-works">See how Rocky works <span aria-hidden="true">↓</span></a></div></div><div class="workspace-mockup hero-workspace"><div class="workspace-bar"><div class="workspace-brand">${brand}</div><div class="workspace-date">Wednesday, 3 September</div><div class="workspace-status"><i></i> All caught up</div></div><div class="workspace-layout"><aside class="workspace-nav"><span class="active">Conversation</span><span>Projects</span><span>Tasks</span><span>Notes</span><span>Lists</span><span>Activity</span></aside><div class="conversation-panel"><div class="conversation-heading"><span>Good afternoon.</span><h3>Three things need<br />your attention.</h3></div><div class="rocky-message">${brand}<div><p>Your website review is due today. The supplier call is at 3:30, and the Android release is waiting on verification.</p><span>Based on today’s work</span></div></div><div class="prompt-field"><span>Ask Rocky anything</span></div></div><aside class="today-panel"><div class="panel-title"><span>Today</span><small>3 open</small></div><div class="reminder-item"><span>Reminder · 3:30 PM</span><strong>Call supplier</strong></div><div class="note-item"><span>Note</span><p>Keep the launch page calm and product-led.</p></div></aside></div></div></section>
+      <section class="story-section light-section connection-story" id="how-rocky-works"><div class="section-heading"><p class="eyebrow">From thought to follow-through</p><h2>Rocky keeps the<br />pieces connected.</h2></div><div class="connection-demo"><div class="spoken-request"><span>You say</span><p>“Remind me to follow up with the designer tomorrow.”</p></div><div class="connection-path"></div><div class="understood-objects"><span class="demo-label">Rocky understands</span><article class="product-object"><div><span>Project</span><strong>Website</strong></div></article><article class="product-object"><div><span>Task</span><strong>Review redesign</strong></div></article><article class="product-object"><div><span>Reminder</span><strong>Follow up tomorrow</strong></div></article></div></div></section>
+      <section class="story-section dark-section workspace-story"><div class="section-heading"><p class="eyebrow">Your workspace</p><h2>One place to think,<br />plan and continue.</h2><p>Conversation and structured work live together.</p></div></section>
+      <section class="story-section light-section voice-story"><div class="voice-story-copy"><p class="eyebrow">Rocky Voice</p><h2>Just say it.</h2><p>Capture a thought or ask what’s next without stopping to organize the interface first.</p></div></section>
+      <section class="story-section dark-section continuity-story"><div class="section-heading"><p class="eyebrow">Continuity</p><h2>Rocky remembers<br />the thread.</h2><p>Return later and continue from the work itself, not a blank prompt.</p></div><div class="day-thread"><article><time>9:12 AM</time><div><span>You</span><p>Let’s work on the Android release.</p></div></article><article><time>Now</time><div><span>Rocky</span><p>We built the signed AAB and were waiting on Play Console verification.</p></div></article></div></section>
+      <section class="story-section feature-section"><div class="feature-intro"><p class="eyebrow">What Rocky brings together</p><h2>Useful in the ways your day actually needs.</h2></div></section>
+      <section class="story-section light-section trust-story"><div><p class="eyebrow">Trust by design</p><h2>Personal intelligence<br />needs boundaries.</h2></div><ul><li>You control permissions.</li><li>You see what Rocky is doing.</li><li>Sensitive actions stay explicit.</li><li>Context remains understandable.</li></ul></section>
+      <section class="final-cta"><p class="eyebrow">Early access</p><h2>Ready when you are.</h2><p>Rocky is getting ready for its first public chapter.</p><a class="button primary" href="/download">Get early access <span aria-hidden="true">↗</span></a></section></main>${footer}</div>`;
+  }
 
   return `<div class="site-shell">
     <a class="skip-link" href="#main">Skip to content</a>
-    <header class="site-header">
-      <a class="brand" href="/" aria-label="Rocky OS home"><span class="brand-mark" aria-hidden="true">R</span><span><strong>Rocky OS</strong><small>Personal Intelligence OS</small></span></a>
-      <nav class="nav" aria-label="Primary navigation">${routeLinks}</nav>
-      <a class="nav-cta" href="/download">Early access</a>
-    </header>
+    <header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><nav class="nav" aria-label="Primary navigation">${routeLinks}</nav><a class="nav-cta" href="/download"><span class="desktop-label">Get early access</span><span class="mobile-label">Early access</span><span aria-hidden="true">↗</span></a></div></header>
     <main id="main">
-      <section class="${route.path === "/" ? "hero" : "page-hero"}">
+      <section class="page-hero">
         <div class="hero-copy">
           <p class="eyebrow">${escapeHtml(route.eyebrow)}</p>
           <h1>${escapeHtml(route.heading)}</h1>
           <p class="lead">${escapeHtml(route.lead)}</p>
-          ${route.path === "/404" ? '<a class="button primary" href="/">Return home</a>' : '<div class="hero-actions"><a class="button primary" href="/download">Join early access</a><a class="button secondary" href="/product">Explore product</a></div>'}
+          ${route.path === "/404" ? '<a class="button primary" href="/">Return home <span aria-hidden="true">→</span></a>' : ''}
         </div>
-        ${heroMedia}
       </section>
       <section class="section route-content">${content}</section>
     </main>
-    <footer class="footer"><div><strong>Rocky OS</strong><p>Personal Intelligence OS by ${companyName}.</p></div><nav aria-label="Footer navigation"><a href="/privacy">Privacy</a><a href="/security">Security</a><a href="/terms">Terms</a><a href="/support">Support</a><a href="/account-deletion">Account deletion</a></nav></footer>
+    ${footer}
   </div>`;
 }
 
