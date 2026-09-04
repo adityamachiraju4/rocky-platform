@@ -17,6 +17,7 @@ from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
 from app.models.task import Task
 from app.models.user import User
+from app.models.auth_action_token import AuthActionToken
 
 __all__ = [
     "User",
@@ -32,4 +33,5 @@ __all__ = [
     "Project",
     "Task",
     "Activity",
+    "AuthActionToken",
 ]

@@ -18,6 +18,7 @@ pydantic==2.13.4
 email-validator==2.3.0    # required by pydantic EmailStr
 python-dotenv==1.2.2
 python-multipart==0.0.21
+httpx==0.28.1             # async HTTP transport for transactional email
 openai==2.48.0
 kokoro==0.9.4
 soundfile==0.14.0

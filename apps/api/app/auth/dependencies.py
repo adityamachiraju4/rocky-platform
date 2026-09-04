@@ -26,6 +26,7 @@ from app.core.security import (
     decode_token,
 )
 from app.models.user import User
+from app.transactional_email.dependencies import TransactionalEmailProviderDep
 from app.services.session_service import (
     SessionService,
     SessionVersionMismatchError,
@@ -33,6 +34,7 @@ from app.services.session_service import (
 
 from .exceptions import InvalidAccessTokenError
 from .service import AuthLifecycleService
+from .action_service import AuthActionService
 
 
 def get_auth_service(
@@ -44,6 +46,16 @@ def get_auth_service(
 AuthServiceDep = Annotated[
     AuthLifecycleService, Depends(get_auth_service)
 ]
+
+
+def get_auth_action_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    email_provider: TransactionalEmailProviderDep,
+) -> AuthActionService:
+    return AuthActionService(session, email_provider)
+
+
+AuthActionServiceDep = Annotated[AuthActionService, Depends(get_auth_action_service)]
 
 
 def _extract_bearer(authorization: str | None) -> str:
@@ -128,4 +140,6 @@ __all__ = [
     "AuthServiceDep",
     "get_current_user",
     "CurrentUserDep",
+    "get_auth_action_service",
+    "AuthActionServiceDep",
 ]

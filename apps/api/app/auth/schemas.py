@@ -50,9 +50,29 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class EmailActionRequest(BaseModel):
+    email: EmailStr
+
+
+class AuthActionConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=4096)
+
+
+class PasswordResetConfirm(AuthActionConfirm):
+    new_password: str = Field(min_length=8, max_length=1024)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 __all__ = [
     "LoginRequest",
     "RefreshRequest",
     "LogoutRequest",
     "TokenResponse",
+    "EmailActionRequest",
+    "AuthActionConfirm",
+    "PasswordResetConfirm",
+    "MessageResponse",
 ]

@@ -9,7 +9,9 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 
-from .dependencies import IdentityServiceDep
+from app.transactional_email.provider import EmailDeliveryError
+
+from .dependencies import IdentityServiceDep, RegistrationServiceDep
 from .exceptions import EmailAlreadyExistsError, UserNotFoundError
 from .schemas import DeviceRead, UserCreate, UserRead, UserUpdate
 
@@ -20,14 +22,22 @@ router = APIRouter(prefix="/identity", tags=["identity"])
     "/users", response_model=UserRead, status_code=status.HTTP_201_CREATED
 )
 async def create_user(
-    payload: UserCreate, service: IdentityServiceDep
+    payload: UserCreate, service: RegistrationServiceDep
 ) -> UserRead:
     try:
-        user = await service.create_user(payload)
+        user = await service.register(payload)
     except EmailAlreadyExistsError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
+        ) from exc
+    except EmailDeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "VERIFICATION_DELIVERY_FAILED",
+                "message": "Account created, but verification email could not be sent. Try resending shortly.",
+            },
         ) from exc
     return UserRead.model_validate(user)
 

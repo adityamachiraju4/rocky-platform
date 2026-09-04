@@ -103,6 +103,7 @@ class SessionService:
         is_trusted: bool = False,
         session_ttl: timedelta | None = None,
         refresh_ttl: timedelta | None = None,
+        session_version: int = 1,
     ) -> CreatedSession:
         """Create a session plus its initial refresh token.
 
@@ -117,7 +118,7 @@ class SessionService:
             last_activity=now,
             expires_at=now + (session_ttl or get_session_ttl()),
             is_trusted=is_trusted,
-            session_version=1,
+            session_version=session_version,
         )
         self._db.add(session)
         await self._db.flush()  # populate session.id

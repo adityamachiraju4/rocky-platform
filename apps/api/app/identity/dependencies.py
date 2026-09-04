@@ -12,8 +12,10 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_session
+from app.auth.dependencies import AuthActionServiceDep
 
 from .service import IdentityService
+from .registration import RegistrationService
 
 
 def get_identity_service(
@@ -26,4 +28,19 @@ IdentityServiceDep = Annotated[
     IdentityService, Depends(get_identity_service)
 ]
 
-__all__ = ["get_identity_service", "IdentityServiceDep"]
+
+def get_registration_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    auth_actions: AuthActionServiceDep,
+) -> RegistrationService:
+    return RegistrationService(IdentityService(session), auth_actions)
+
+
+RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]
+
+__all__ = [
+    "get_identity_service",
+    "IdentityServiceDep",
+    "get_registration_service",
+    "RegistrationServiceDep",
+]

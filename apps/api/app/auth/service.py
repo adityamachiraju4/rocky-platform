@@ -90,7 +90,9 @@ class AuthLifecycleService:
         user = await self._auth.authenticate(payload.email, payload.password)
         device = await self._resolve_device(user.id, payload)
         created = await self._sessions.create_session(
-            user_id=user.id, device_id=device.id
+            user_id=user.id,
+            device_id=device.id,
+            session_version=user.session_version,
         )  # commits device + session + refresh atomically
         access = self._mint_access(user.id, created.session.id)
         return TokenResponse(

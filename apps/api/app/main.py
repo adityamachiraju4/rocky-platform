@@ -92,7 +92,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     management is owned by Alembic — startup never creates tables.
     """
     logger.info("Rocky API starting up")
-    get_engine()  # construct the process-wide engine singleton
+    try:
+        settings.validate_auth_runtime_configuration()
+    except settings.MissingConfigurationError as exc:
+        logger.critical(
+            "Rocky API startup configuration invalid: error_type=%s reason=%s",
+            exc.__class__.__name__,
+            str(exc),
+        )
+        raise
+    try:
+        get_engine()  # validate database config and construct the lazy engine
+    except Exception as exc:
+        logger.critical(
+            "Rocky API database configuration invalid: error_type=%s",
+            exc.__class__.__name__,
+        )
+        raise RuntimeError("Database configuration is invalid.") from exc
     voice_warmup_task = asyncio.create_task(_warm_voice_models())
     try:
         yield
@@ -157,8 +173,14 @@ async def ready():
     try:
         async with get_sessionmaker()() as session:
             await session.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001 - probe reports failure, never raises
-        logger.exception("Readiness check failed")
+    except Exception as exc:  # noqa: BLE001 - probe reports failure, never raises
+        original = getattr(exc, "orig", None)
+        logger.error(
+            "Readiness database check failed: error_type=%s "
+            "database_error_code=%s",
+            exc.__class__.__name__,
+            getattr(original, "sqlstate", None),
+        )
         return JSONResponse(
             status_code=503,
             content={"status": "not ready"},

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from app.models.notification import Notification
     from app.models.note import Note
     from app.models.list import List
+    from app.models.auth_action_token import AuthActionToken
 
 
 class User(Base):
@@ -123,6 +124,9 @@ class User(Base):
         passive_deletes=True,
     )
     lists: Mapped[list["List"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    auth_action_tokens: Mapped[list["AuthActionToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 

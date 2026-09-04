@@ -37,6 +37,12 @@ Environment variables
 * ``LOCAL_TTS_VOICE`` — local Rocky audition/default voice.
 * ``LOCAL_TTS_SPEED`` — local speech speed.
 * ``LOCAL_TTS_WARMUP`` — warm local speech after API startup.
+* ``CORS_ALLOWED_ORIGINS`` — comma-separated browser/native app origins allowed
+  to call private APIs cross-origin.
+* ``PUBLIC_APP_URL`` — public web-app origin used for auth action links.
+* ``EMAIL_FROM`` — verified transactional sender identity.
+* ``RESEND_API_KEY`` — Resend API credential for transactional email.
+* ``AUTH_ACTION_TOKEN_PEPPER`` — secret used to hash verification/reset tokens.
 """
 from __future__ import annotations
 
@@ -60,6 +66,7 @@ _load_dotenv(_ENV_PATH, override=False)
 
 import os
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 class MissingConfigurationError(RuntimeError):
     """Raised when a required configuration value is missing."""
@@ -87,6 +94,18 @@ _DEFAULT_LOCAL_TTS_PROVIDER = "kokoro"
 _DEFAULT_LOCAL_TTS_VOICE = "am_adam"
 _DEFAULT_LOCAL_TTS_SPEED = 0.95
 _DEFAULT_LOCAL_TTS_WARMUP = True
+_DEFAULT_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+    "https://localhost",
+    "https://rocky-web-preview.vercel.app",
+)
+_DEFAULT_PUBLIC_APP_URL = "http://localhost:5173"
+_DEFAULT_EMAIL_VERIFICATION_TTL_HOURS = 24
+_DEFAULT_PASSWORD_RESET_TTL_MINUTES = 60
+_DEFAULT_EMAIL_VERIFICATION_COOLDOWN_SECONDS = 60
 _MISSING = object()
 
 
@@ -125,6 +144,61 @@ def get_refresh_token_pepper() -> bytes:
         )
 
     return raw.encode("utf-8")
+
+
+def _required(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        raise MissingConfigurationError(f"{name} is not configured.")
+    return raw.strip()
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero.")
+    return value
+
+
+def get_auth_action_token_pepper() -> bytes:
+    return _required("AUTH_ACTION_TOKEN_PEPPER").encode("utf-8")
+
+
+def get_public_app_url() -> str:
+    configured = os.getenv("PUBLIC_APP_URL")
+    if not configured and (os.getenv("APP_ENV") or "development").strip().lower() == "production":
+        raise MissingConfigurationError("PUBLIC_APP_URL is not configured.")
+    raw = (configured or _DEFAULT_PUBLIC_APP_URL).strip().rstrip("/")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+        raise RuntimeError("PUBLIC_APP_URL must be an HTTP(S) origin without a query or fragment.")
+    return raw
+
+
+def get_email_from() -> str:
+    return _required("EMAIL_FROM")
+
+
+def get_resend_api_key() -> str:
+    return _required("RESEND_API_KEY")
+
+
+def get_email_verification_ttl() -> timedelta:
+    return timedelta(hours=_positive_int("EMAIL_VERIFICATION_TTL_HOURS", _DEFAULT_EMAIL_VERIFICATION_TTL_HOURS))
+
+
+def get_password_reset_ttl() -> timedelta:
+    return timedelta(minutes=_positive_int("PASSWORD_RESET_TTL_MINUTES", _DEFAULT_PASSWORD_RESET_TTL_MINUTES))
+
+
+def get_email_verification_cooldown() -> timedelta:
+    return timedelta(seconds=_positive_int("EMAIL_VERIFICATION_COOLDOWN_SECONDS", _DEFAULT_EMAIL_VERIFICATION_COOLDOWN_SECONDS))
 
 
 def get_openai_api_key() -> str | None:
@@ -318,6 +392,48 @@ def get_local_tts_warmup() -> bool:
     return _env_bool("LOCAL_TTS_WARMUP", _DEFAULT_LOCAL_TTS_WARMUP)
 
 
+def get_cors_allowed_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOWED_ORIGINS")
+    if raw is None or raw.strip() == "":
+        return list(_DEFAULT_CORS_ALLOWED_ORIGINS)
+    origins = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+    if not origins:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS must contain at least one origin.")
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+            or origin == "*"
+        ):
+            raise RuntimeError(
+                "CORS_ALLOWED_ORIGINS entries must be HTTP(S) origins "
+                "without credentials, paths, queries, or fragments."
+            )
+    return list(dict.fromkeys(origins))
+
+
+def validate_auth_runtime_configuration() -> None:
+    """Fail startup before login can encounter missing core auth secrets."""
+
+    missing = [
+        name
+        for name in ("SECRET_KEY", "REFRESH_TOKEN_PEPPER")
+        if not (os.getenv(name) or "").strip()
+    ]
+    if missing:
+        raise MissingConfigurationError(
+            "Missing required authentication configuration: "
+            + ", ".join(missing)
+            + "."
+        )
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -338,6 +454,13 @@ __all__ = [
     "get_session_ttl",
     "get_refresh_token_ttl",
     "get_refresh_token_pepper",
+    "get_auth_action_token_pepper",
+    "get_public_app_url",
+    "get_email_from",
+    "get_resend_api_key",
+    "get_email_verification_ttl",
+    "get_password_reset_ttl",
+    "get_email_verification_cooldown",
     "get_openai_api_key",
     "get_openai_model",
     "get_openai_timeout_seconds",
@@ -366,4 +489,6 @@ __all__ = [
     "get_local_tts_voice",
     "get_local_tts_speed",
     "get_local_tts_warmup",
+    "get_cors_allowed_origins",
+    "validate_auth_runtime_configuration",
 ]
