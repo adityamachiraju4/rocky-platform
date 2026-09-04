@@ -3,6 +3,9 @@ import type { ReactNode } from "react";
 import { AuthProvider } from "./auth";
 import { useAuth } from "./useAuth";
 import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+import PasswordRecoveryPage from "./pages/PasswordRecoveryPage";
+import VerifyEmailPage from "./pages/VerifyEmailPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import MissionControlPage from "./pages/MissionControlPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
@@ -21,14 +24,24 @@ function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function AppRoutes() {
+function PublicOnly({ children }: { children: ReactNode }) {
   const { status } = useAuth();
+  if (status === "booting") return <div className="boot"><span className="brand-loader" aria-hidden="true" />Loading Rocky…</div>;
+  if (status === "authed") return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+function AppRoutes() {
   return (
     <Routes>
       <Route
         path="/login"
-        element={status === "authed" ? <Navigate to="/" replace /> : <LoginPage />}
+        element={<PublicOnly><LoginPage /></PublicOnly>}
       />
+      <Route path="/register" element={<PublicOnly><RegisterPage /></PublicOnly>} />
+      <Route path="/forgot-password" element={<PublicOnly><PasswordRecoveryPage /></PublicOnly>} />
+      <Route path="/reset-password" element={<PublicOnly><PasswordRecoveryPage reset /></PublicOnly>} />
+      <Route path="/verify-email" element={<PublicOnly><VerifyEmailPage /></PublicOnly>} />
       <Route
         path="/"
         element={

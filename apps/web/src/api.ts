@@ -14,6 +14,9 @@ import {
   setAccessToken,
   setRefreshToken,
 } from "./tokenStore";
+import { apiUrl } from "./apiConfig";
+import { ApiError } from "./apiErrors";
+import { expectArrayResponse } from "./apiResponse";
 import type {
   Activity,
   ConversationRequest,
@@ -42,20 +45,12 @@ import type {
   RockyListItemCreate,
   RockyListItemUpdate,
   UserProfile,
+  UserCreate,
+  RegisteredUser,
+  MessageResponse,
 } from "./types";
 
-const BASE = "/api";
-
-export class ApiError extends Error {
-  status: number;
-  detail: unknown;
-  constructor(status: number, detail: unknown, message: string) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.detail = detail;
-  }
-}
+export { ApiError } from "./apiErrors";
 
 // Raised when refresh has failed and the session is unrecoverable.
 export class AuthExpiredError extends Error {
@@ -85,25 +80,33 @@ function detailMessage(detail: unknown, fallback: string): string {
   return fallback;
 }
 
+function requestUrl(path: string): string {
+  try {
+    return apiUrl(path);
+  } catch (error) {
+    throw new ApiError(0, null, error instanceof Error ? error.message : "Invalid API configuration");
+  }
+}
+
 // Single-flight refresh. Returns true on success (tokens rotated), false otherwise.
 async function runRefresh(): Promise<boolean> {
-  const refreshToken = getRefreshToken();
+  const refreshToken = await getRefreshToken();
   if (!refreshToken) return false;
 
-  const res = await fetch(`${BASE}/auth/refresh`, {
+  const res = await fetch(requestUrl("/auth/refresh"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refresh_token: refreshToken }),
   });
 
   if (!res.ok) {
-    clearTokens();
+    await clearTokens();
     return false;
   }
 
   const tokens = (await res.json()) as TokenResponse;
   setAccessToken(tokens.access_token);
-  setRefreshToken(tokens.refresh_token);
+  await setRefreshToken(tokens.refresh_token);
   return true;
 }
 
@@ -140,7 +143,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       const token = getAccessToken();
       if (token) headers["Authorization"] = `Bearer ${token}`;
     }
-    return fetch(`${BASE}${path}`, {
+    return fetch(requestUrl(path), {
       method,
       headers,
       body: body === undefined
@@ -159,7 +162,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     if (!refreshed) throw new AuthExpiredError();
     res = await doFetch();
     if (res.status === 401) {
-      clearTokens();
+      await clearTokens();
       throw new AuthExpiredError();
     }
   }
@@ -171,6 +174,10 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     throw new ApiError(res.status, parsed, detailMessage(parsed, `HTTP ${res.status}`));
   }
   return parsed as T;
+}
+
+async function requestArray<T>(path: string, opts: RequestOptions = {}): Promise<T[]> {
+  return expectArrayResponse<T>(await request<unknown>(path, opts), path);
 }
 
 async function requestBlob(
@@ -186,7 +193,7 @@ async function requestBlob(
       const token = getAccessToken();
       if (token) headers["Authorization"] = `Bearer ${token}`;
     }
-    return fetch(`${BASE}${path}`, {
+    return fetch(requestUrl(path), {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -201,7 +208,7 @@ async function requestBlob(
     if (!refreshed) throw new AuthExpiredError();
     res = await doFetch();
     if (res.status === 401) {
-      clearTokens();
+      await clearTokens();
       throw new AuthExpiredError();
     }
   }
@@ -227,11 +234,39 @@ export async function login(payload: LoginRequest): Promise<void> {
     auth: false,
   });
   setAccessToken(tokens.access_token);
-  setRefreshToken(tokens.refresh_token);
+  await setRefreshToken(tokens.refresh_token);
 }
 
+export async function register(payload: UserCreate): Promise<RegisteredUser> {
+  return request<RegisteredUser>("/identity/users", {
+    method: "POST",
+    body: payload,
+    auth: false,
+  });
+}
+
+export const requestEmailVerification = (email: string): Promise<MessageResponse> =>
+  request<MessageResponse>("/auth/email-verification/request", {
+    method: "POST", body: { email }, auth: false,
+  });
+
+export const confirmEmailVerification = (token: string): Promise<MessageResponse> =>
+  request<MessageResponse>("/auth/email-verification/confirm", {
+    method: "POST", body: { token }, auth: false,
+  });
+
+export const requestPasswordReset = (email: string): Promise<MessageResponse> =>
+  request<MessageResponse>("/auth/password-reset/request", {
+    method: "POST", body: { email }, auth: false,
+  });
+
+export const confirmPasswordReset = (token: string, newPassword: string): Promise<MessageResponse> =>
+  request<MessageResponse>("/auth/password-reset/confirm", {
+    method: "POST", body: { token, new_password: newPassword }, auth: false,
+  });
+
 export async function logout(): Promise<void> {
-  const refreshToken = getRefreshToken();
+  const refreshToken = await getRefreshToken();
   if (refreshToken) {
     try {
       await request<void>("/auth/logout", {
@@ -243,18 +278,18 @@ export async function logout(): Promise<void> {
       /* logout is best-effort; clear locally regardless */
     }
   }
-  clearTokens();
+  await clearTokens();
 }
 
 // Boot an authed session from a stored refresh token. Returns true if authed.
 export async function bootSession(): Promise<boolean> {
-  if (!getRefreshToken()) return false;
+  if (!await getRefreshToken()) return false;
   return ensureRefresh();
 }
 
 // ---- Projects -----------------------------------------------------------
 
-export const listProjects = (): Promise<Project[]> => request<Project[]>("/projects");
+export const listProjects = (): Promise<Project[]> => requestArray<Project>("/projects");
 
 export const createProject = (body: ProjectCreate): Promise<Project> =>
   request<Project>("/projects", { method: "POST", body });
@@ -268,7 +303,7 @@ export const updateProject = (id: string, body: ProjectUpdate): Promise<Project>
 // ---- Tasks --------------------------------------------------------------
 
 export const listTasks = (projectId: string): Promise<Task[]> =>
-  request<Task[]>(`/projects/${projectId}/tasks`);
+  requestArray<Task>(`/projects/${projectId}/tasks`);
 
 export const createTask = (projectId: string, body: TaskCreate): Promise<Task> =>
   request<Task>(`/projects/${projectId}/tasks`, { method: "POST", body });
@@ -282,7 +317,7 @@ export const updateTask = (
 
 // ---- Activity -----------------------------------------------------------
 
-export const listActivity = (): Promise<Activity[]> => request<Activity[]>("/activity");
+export const listActivity = (): Promise<Activity[]> => requestArray<Activity>("/activity");
 
 // ---- Conversation -------------------------------------------------------
 
@@ -311,7 +346,7 @@ export const transcribeAudio = (
 // ---- Reminders ----------------------------------------------------------
 
 export const listReminders = (status?: Reminder["status"]): Promise<Reminder[]> =>
-  request<Reminder[]>(status ? `/reminders?status=${encodeURIComponent(status)}` : "/reminders");
+  requestArray<Reminder>(status ? `/reminders?status=${encodeURIComponent(status)}` : "/reminders");
 
 export const createReminder = (body: ReminderCreate): Promise<Reminder> =>
   request<Reminder>("/reminders", { method: "POST", body });
@@ -325,7 +360,7 @@ export const cancelReminder = (id: string): Promise<Reminder> =>
 // ---- Notifications ------------------------------------------------------
 
 export const listNotifications = (status?: Notification["status"]): Promise<Notification[]> =>
-  request<Notification[]>(status ? `/notifications?status=${encodeURIComponent(status)}` : "/notifications");
+  requestArray<Notification>(status ? `/notifications?status=${encodeURIComponent(status)}` : "/notifications");
 
 export const updateNotification = (
   id: string,
@@ -336,7 +371,7 @@ export const updateNotification = (
 // ---- Notes --------------------------------------------------------------
 
 export const listNotes = (status: Note["status"] = "active"): Promise<Note[]> =>
-  request<Note[]>(`/notes?status=${encodeURIComponent(status)}`);
+  requestArray<Note>(`/notes?status=${encodeURIComponent(status)}`);
 
 export const getNote = (id: string): Promise<Note> =>
   request<Note>(`/notes/${id}`);
@@ -350,7 +385,7 @@ export const updateNote = (id: string, body: NoteUpdate): Promise<Note> =>
 // ---- Lists --------------------------------------------------------------
 
 export const listLists = (status: RockyList["status"] = "active"): Promise<RockyList[]> =>
-  request<RockyList[]>(`/lists?status=${encodeURIComponent(status)}`);
+  requestArray<RockyList>(`/lists?status=${encodeURIComponent(status)}`);
 
 export const getList = (id: string): Promise<RockyList> =>
   request<RockyList>(`/lists/${id}`);
@@ -365,7 +400,7 @@ export const listListItems = (
   listId: string,
   status?: RockyListItem["status"],
 ): Promise<RockyListItem[]> =>
-  request<RockyListItem[]>(
+  requestArray<RockyListItem>(
     status
       ? `/lists/${listId}/items?status=${encodeURIComponent(status)}`
       : `/lists/${listId}/items`,

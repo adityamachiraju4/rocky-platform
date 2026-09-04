@@ -21,6 +21,28 @@ export interface LoginRequest {
   platform?: string;
 }
 
+export interface UserCreate {
+  full_name: string;
+  email: string;
+  password: string;
+  timezone?: string;
+}
+
+export interface RegisteredUser {
+  id: UUID;
+  email: string;
+  full_name: string | null;
+  timezone: string;
+  is_active: boolean;
+  is_verified: boolean;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+}
+
+export interface MessageResponse {
+  message: string;
+}
+
 export interface Project {
   id: UUID;
   user_id: UUID;
