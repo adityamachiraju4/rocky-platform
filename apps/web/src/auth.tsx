@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { bootSession, login as apiLogin, logout as apiLogout } from "./api";
 import { AuthContext, type AuthStatus } from "./authContext";
+import { nativeDeviceLoginMetadata } from "./native";
 import type { LoginRequest } from "./types";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -21,7 +22,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (payload: LoginRequest) => {
-    await apiLogin(payload);
+    await apiLogin({ ...payload, ...await nativeDeviceLoginMetadata() });
     setStatus("authed");
   }, []);
 

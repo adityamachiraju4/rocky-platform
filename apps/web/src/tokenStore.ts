@@ -1,7 +1,9 @@
-// Token storage: access token in memory (dies on reload, re-minted via refresh),
-// refresh token in localStorage (must survive reload; no httpOnly-cookie path from
-// the backend). localStorage carries XSS exposure — accepted tradeoff, recorded as
-// a finding. The access token is deliberately NOT persisted.
+// Token storage: access token in memory (dies on reload, re-minted via refresh).
+// Refresh-token persistence is abstracted so web/PWA can keep the existing
+// localStorage behavior while Capacitor native can use its native storage bridge.
+
+import { Preferences } from "@capacitor/preferences";
+import { isNativeApp } from "./native";
 
 const REFRESH_KEY = "rocky.refresh_token";
 
@@ -15,7 +17,14 @@ export function setAccessToken(token: string | null): void {
   accessToken = token;
 }
 
-export function getRefreshToken(): string | null {
+export async function getRefreshToken(): Promise<string | null> {
+  if (isNativeApp()) {
+    try {
+      return (await Preferences.get({ key: REFRESH_KEY })).value;
+    } catch {
+      return null;
+    }
+  }
   try {
     return localStorage.getItem(REFRESH_KEY);
   } catch {
@@ -23,7 +32,19 @@ export function getRefreshToken(): string | null {
   }
 }
 
-export function setRefreshToken(token: string | null): void {
+export async function setRefreshToken(token: string | null): Promise<void> {
+  if (isNativeApp()) {
+    try {
+      if (token === null) {
+        await Preferences.remove({ key: REFRESH_KEY });
+      } else {
+        await Preferences.set({ key: REFRESH_KEY, value: token });
+      }
+    } catch {
+      /* native storage unavailable; session becomes memory-only */
+    }
+    return;
+  }
   try {
     if (token === null) {
       localStorage.removeItem(REFRESH_KEY);
@@ -35,7 +56,7 @@ export function setRefreshToken(token: string | null): void {
   }
 }
 
-export function clearTokens(): void {
+export async function clearTokens(): Promise<void> {
   accessToken = null;
-  setRefreshToken(null);
+  await setRefreshToken(null);
 }

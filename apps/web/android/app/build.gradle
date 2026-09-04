@@ -1,0 +1,115 @@
+apply plugin: 'com.android.application'
+
+def localGradleProperties = new Properties()
+def localGradlePropertiesFile = rootProject.file('local.properties')
+if (localGradlePropertiesFile.exists()) {
+    localGradlePropertiesFile.withInputStream { localGradleProperties.load(it) }
+}
+
+def localOrEnv = { propertyName, envName ->
+    localGradleProperties.getProperty(propertyName) ?: System.getenv(envName)
+}
+
+def releaseStoreFile = localOrEnv('rockyUploadStoreFile', 'ROCKY_UPLOAD_STORE_FILE')
+def releaseStorePassword = localOrEnv('rockyUploadStorePassword', 'ROCKY_UPLOAD_STORE_PASSWORD')
+def releaseKeyAlias = localOrEnv('rockyUploadKeyAlias', 'ROCKY_UPLOAD_KEY_ALIAS')
+def releaseKeyPassword = localOrEnv('rockyUploadKeyPassword', 'ROCKY_UPLOAD_KEY_PASSWORD')
+def releaseSigningConfigured = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+android {
+    namespace = "com.phredsec.rocky"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.phredsec.rocky"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+tasks.register('verifyRockyReleaseWebConfig') {
+    doLast {
+        def publicDir = file('src/main/assets/public')
+        if (!publicDir.exists()) {
+            throw new GradleException('Release web assets are missing. Run npm run native:sync:android:release before bundleRelease.')
+        }
+
+        def releaseApiBase = 'https://rocky-platform-production.up.railway.app'
+        def forbiddenApiBases = [
+            '10.0.2.2'
+        ]
+        def releaseAssets = fileTree(publicDir) {
+            include '**/*.html'
+            include '**/*.js'
+            include '**/*.json'
+            include '**/*.webmanifest'
+        }
+        def releaseAssetText = releaseAssets.files.collect { it.getText('UTF-8') }.join('\n')
+        if (!releaseAssetText.contains(releaseApiBase)) {
+            throw new GradleException("Release web assets must be built with VITE_API_BASE_URL=${releaseApiBase}.")
+        }
+        def forbiddenMatch = forbiddenApiBases.find { releaseAssetText.contains(it) }
+        if (forbiddenMatch) {
+            throw new GradleException("Release web assets contain a development API host: ${forbiddenMatch}. Re-run native release sync with VITE_API_BASE_URL=${releaseApiBase}.")
+        }
+    }
+}
+
+tasks.matching { it.name in ['bundleRelease', 'assembleRelease'] }.configureEach {
+    dependsOn tasks.named('verifyRockyReleaseWebConfig')
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

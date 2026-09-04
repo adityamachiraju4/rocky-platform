@@ -198,6 +198,7 @@ function RockyInteraction({
   const [response, setResponse] = useState<ConversationResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
   const [listening, setListening] = useState(false);
   const [micStarting, setMicStarting] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -355,13 +356,18 @@ function RockyInteraction({
       else lifecycleActiveRef.current = true;
     };
     const onPageShow = () => { lifecycleActiveRef.current = true; };
+    const onNativeForeground = () => { lifecycleActiveRef.current = true; };
     window.addEventListener("pagehide", stopVoiceForLifecycle);
     window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("rocky:native-background", stopVoiceForLifecycle);
+    window.addEventListener("rocky:native-foreground", onNativeForeground);
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       lifecycleActiveRef.current = false;
       window.removeEventListener("pagehide", stopVoiceForLifecycle);
       window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("rocky:native-background", stopVoiceForLifecycle);
+      window.removeEventListener("rocky:native-foreground", onNativeForeground);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       const recognition = recognitionRef.current;
       recognitionRef.current = null;
@@ -382,6 +388,22 @@ function RockyInteraction({
       cancelActiveTurn(false);
     };
   }, [cancelActiveTurn, cleanupRecording, closePlaybackContext, stopRockySpeech]);
+
+  useEffect(() => {
+    const setBrowserOnline = () => setOnline(navigator.onLine);
+    const setNativeOnline = (event: Event) => {
+      const detail = (event as CustomEvent<{ online?: boolean }>).detail;
+      if (typeof detail?.online === "boolean") setOnline(detail.online);
+    };
+    window.addEventListener("online", setBrowserOnline);
+    window.addEventListener("offline", setBrowserOnline);
+    window.addEventListener("rocky:network-status", setNativeOnline);
+    return () => {
+      window.removeEventListener("online", setBrowserOnline);
+      window.removeEventListener("offline", setBrowserOnline);
+      window.removeEventListener("rocky:network-status", setNativeOnline);
+    };
+  }, []);
 
   useEffect(() => {
     const active = submitting || micStarting || interactionState !== "idle";
@@ -655,6 +677,10 @@ function RockyInteraction({
   const submitMessage = async (message: string) => {
     const text = message.trim();
     if (!text) return;
+    if (!online) {
+      setError("Rocky needs the backend for that. Please reconnect and try again.");
+      return;
+    }
     const turn = beginTurn();
     if (!turn) return;
     stopRockySpeech();
@@ -1033,6 +1059,7 @@ function RockyInteraction({
           </button>
         )}
         {!voiceSupported && <span>{voiceUnavailableMessage}</span>}
+        {!online && <span className="err">Offline. Backend-dependent requests are paused.</span>}
         {voiceError && <span className="err">{voiceError}</span>}
         {error && <span className="err">{error}</span>}
       </div>

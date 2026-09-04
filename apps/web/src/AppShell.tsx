@@ -73,6 +73,18 @@ export default function AppShell({ children }: { children: ReactNode }) {
     };
   }, [moreOpen]);
 
+  useEffect(() => {
+    const closeOnNativeBack = (event: Event) => {
+      if (!moreOpen) return;
+      event.preventDefault();
+      setMoreOpen(false);
+    };
+    window.addEventListener("rocky:native-back", closeOnNativeBack);
+    return () => {
+      window.removeEventListener("rocky:native-back", closeOnNativeBack);
+    };
+  }, [moreOpen]);
+
   const onSignOut = async () => {
     await logout();
     navigate("/login", { replace: true });
