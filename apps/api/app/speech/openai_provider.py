@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from app.speech.diagnostics import openai_exception_details
 from app.speech.provider import SpeechAudio, SpeechProviderError
 
 logger = logging.getLogger(__name__)
@@ -59,13 +60,27 @@ class OpenAISpeechProvider:
             content = response.content
         except Exception as exc:  # noqa: BLE001 - endpoint returns 503
             self.last_error_code = "request_failed"
+            details = openai_exception_details(exc)
             logger.warning(
-                "OpenAI speech request failed",
-                extra={"provider_error_code": self.last_error_code},
+                "OpenAI speech request failed: status=%s error_type=%s "
+                "error_code=%s reason=%s model=%s",
+                details["status"],
+                details["error_type"],
+                details["error_code"],
+                details["reason"],
+                self._model,
+                extra={
+                    "speech_provider": "openai",
+                    "provider_error_code": self.last_error_code,
+                    **details,
+                    "model": self._model,
+                },
             )
             raise SpeechProviderError(
                 "OpenAI speech request failed.",
                 code=self.last_error_code,
+                error_type=str(details["error_type"]),
+                reason=str(details["reason"]),
             ) from exc
 
         if not content:
@@ -77,6 +92,8 @@ class OpenAISpeechProvider:
             raise SpeechProviderError(
                 "OpenAI speech response returned empty audio.",
                 code=self.last_error_code,
+                error_type="EmptyAudio",
+                reason="OpenAI returned an empty audio response.",
             )
 
         return SpeechAudio(content=content, media_type="audio/mpeg")

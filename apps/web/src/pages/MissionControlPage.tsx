@@ -6,7 +6,7 @@ import { useResource } from "../useApi";
 import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
 import { humanizeEvent } from "../activityLabels";
 import type { ConversationResponse, Reminder } from "../types";
-import { startBrowserSpeech } from "../browserSpeech";
+import { startBrowserSpeech, type BrowserSpeechStartResult } from "../browserSpeech";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -393,8 +393,12 @@ function RockyInteraction({
     };
   }, [interactionState, micStarting, submitting]);
 
-  const speakBrowser = async (reply: string, language: string, speechId: number) => {
-    if (!speechSupported) return;
+  const speakBrowser = async (
+    reply: string,
+    language: string,
+    speechId: number,
+  ): Promise<BrowserSpeechStartResult | "unavailable"> => {
+    if (!speechSupported) return "unavailable";
     const utterance = new SpeechSynthesisUtterance(reply);
     const browserSpeechState = () => ({
       visibility: document.visibilityState,
@@ -407,6 +411,9 @@ function RockyInteraction({
     speechDebug("browser speech preparing", browserSpeechState());
     utterance.onstart = () => {
       speechDebug("browser speech started", browserSpeechState());
+      if (speechIdRef.current === speechId) {
+        setVoiceError("Neural speech is unavailable; using browser voice.");
+      }
     };
     utterance.onend = () => {
       speechDebug("browser speech ended", browserSpeechState());
@@ -425,6 +432,7 @@ function RockyInteraction({
         if (browserSpeechTimerRef.current !== null) window.clearTimeout(browserSpeechTimerRef.current);
         browserSpeechTimerRef.current = null;
         setInteractionState("idle");
+        setVoiceError("Browser voice couldn't play. The text response is still available; use Replay to try again.");
       }
     };
     utterance.onpause = () => {
@@ -454,7 +462,10 @@ function RockyInteraction({
       speechDebug("browser speech could not be queued", browserSpeechState());
       setInteractionState("idle");
       setVoiceError("Audio couldn't start. The text response is still available; use Replay to try again.");
+    } else {
+      setInteractionState("idle");
     }
+    return result;
   };
 
   const ensureAudioContext = async (): Promise<AudioContext> => {
@@ -501,6 +512,7 @@ function RockyInteraction({
     source.onended = () => {
       if (audioSourceRef.current === source && speechIdRef.current === speechId) {
         audioSourceRef.current = null;
+        closePlaybackContext();
         setInteractionState("idle");
       }
     };
@@ -551,16 +563,18 @@ function RockyInteraction({
       });
       stopRockySpeech();
       const browserSpeechId = speechIdRef.current;
-      await speakBrowser(reply, language, browserSpeechId);
-      if (speechSupported) {
+      const browserResult = await speakBrowser(reply, language || "en", browserSpeechId);
+      if (browserResult === "started") {
         setVoiceError(
           e instanceof ApiError
-            ? "Neural speech is unavailable; using browser voice."
-            : "Audio playback was blocked; using the browser voice. Replay is also available.",
+            ? "Neural speech is unavailable; browser voice playback was requested."
+            : "Audio playback was blocked; browser voice playback was requested.",
         );
       } else {
         setVoiceError(
-          "Audio couldn't start. The text response is still available; use Replay to try again.",
+          browserResult === "unavailable"
+            ? "Browser speech is unavailable. The text response is still available."
+            : "Browser speech couldn't start. The text response is still available; use Replay to try again.",
         );
       }
     }

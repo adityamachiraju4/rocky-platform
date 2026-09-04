@@ -99,6 +99,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOCAL_WHISPER_MODEL", raising=False)
     monkeypatch.delenv("LOCAL_WHISPER_DEVICE", raising=False)
     monkeypatch.delenv("LOCAL_WHISPER_COMPUTE_TYPE", raising=False)
+    monkeypatch.delenv("TRANSCRIPTION_LANGUAGE", raising=False)
     monkeypatch.delenv("LOCAL_WHISPER_LANGUAGE", raising=False)
     monkeypatch.delenv("LOCAL_WHISPER_WARMUP", raising=False)
     transcription_dependencies._local_whisper_provider = None
@@ -289,6 +290,88 @@ async def test_transcription_provider_failure_is_clean_503(ctx) -> None:
     assert resp.json()["detail"] == "Transcription is unavailable."
 
 
+@pytest.mark.asyncio
+async def test_transcription_empty_transcript_is_no_speech_not_503(ctx) -> None:
+    _use_fake_provider(TranscriptionResult(text="   "))
+    client, sessionmaker = ctx
+    headers = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/transcribe",
+        files={"audio": ("speech.webm", b"audio-bytes", "audio/webm")},
+        headers=headers,
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "I didn't catch that clearly. Could you say it again?"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcription_empty_provider_error_is_no_speech_not_503(
+    ctx,
+) -> None:
+    _use_fake_provider(
+        TranscriptionProviderError(
+            "empty transcript",
+            code="empty_transcription",
+        )
+    )
+    client, sessionmaker = ctx
+    headers = await _auth_headers(client, sessionmaker)
+
+    resp = await client.post(
+        "/transcribe",
+        files={"audio": ("speech.webm", b"audio-bytes", "audio/webm")},
+        headers=headers,
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "I didn't catch that clearly. Could you say it again?"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transcript", [".", "!", "[music]", "(silence)"])
+async def test_unusable_transcript_uses_english_clarification(
+    ctx, transcript: str
+) -> None:
+    _use_fake_provider(TranscriptionResult(text=transcript, language="en"))
+    client, sessionmaker = ctx
+    headers = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/transcribe",
+        files={"audio": ("speech.webm", b"audio-bytes", "audio/webm")},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "I didn't catch that clearly. Could you say it again?"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transcript", ["What's next?", "Remind me.", "Projects."])
+async def test_short_english_commands_are_preserved(ctx, transcript: str) -> None:
+    _use_fake_provider(TranscriptionResult(text=transcript, language="en"))
+    client, sessionmaker = ctx
+    headers = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/transcribe",
+        files={"audio": ("speech.webm", b"audio-bytes", "audio/webm")},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["text"] == transcript
+    assert response.json()["language"] == "en"
+
+
 def test_transcription_provider_wiring_uses_openai_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -349,8 +432,16 @@ def test_transcription_provider_defaults_to_local() -> None:
     assert isinstance(provider, LocalWhisperTranscriptionProvider)
 
 
-def test_local_whisper_language_defaults_to_auto() -> None:
-    assert settings.get_local_whisper_language() == "auto"
+def test_transcription_language_defaults_to_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TRANSCRIPTION_LANGUAGE", raising=False)
+    monkeypatch.delenv("LOCAL_WHISPER_LANGUAGE", raising=False)
+
+    assert settings.get_local_whisper_language() == "en"
+    provider = get_local_whisper_transcription_provider()
+    assert isinstance(provider, LocalWhisperTranscriptionProvider)
+    assert provider.language == "en"
 
 
 def test_local_whisper_warmup_defaults_to_enabled() -> None:
@@ -367,6 +458,18 @@ def test_local_whisper_language_can_be_configured(
     assert settings.get_local_whisper_language() == "es"
     assert isinstance(provider, LocalWhisperTranscriptionProvider)
     assert provider.language == "es"
+
+
+def test_transcription_language_supports_experimental_auto_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_LANGUAGE", "auto")
+
+    provider = get_local_whisper_transcription_provider()
+
+    assert settings.get_local_whisper_language() == "auto"
+    assert isinstance(provider, LocalWhisperTranscriptionProvider)
+    assert provider.language == "auto"
 
 
 def test_language_stabilizer_uses_clear_english_over_marginal_spanish() -> None:
@@ -590,6 +693,39 @@ async def test_local_whisper_warmup_loads_and_reuses_model(
 
 
 @pytest.mark.asyncio
+async def test_local_whisper_empty_segments_reports_empty_transcription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _WhisperModel:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, _path: str, **_kwargs):
+            return [], SimpleNamespace(language="en", language_probability=0.99)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=_WhisperModel),
+    )
+    provider = LocalWhisperTranscriptionProvider(
+        model_name="small",
+        device="auto",
+        compute_type="auto",
+        language="auto",
+    )
+
+    with pytest.raises(TranscriptionProviderError) as excinfo:
+        await provider.transcribe(
+            b"audio",
+            filename="speech.webm",
+            content_type="audio/webm",
+        )
+
+    assert excinfo.value.code == "empty_transcription"
+
+
+@pytest.mark.asyncio
 async def test_local_whisper_provider_passes_language_and_transcribe_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -604,7 +740,9 @@ async def test_local_whisper_provider_passes_language_and_transcribe_task(
 
         def transcribe(self, path: str, **kwargs):
             type(self).calls.append({"path": path, **kwargs})
-            return [_Segment()], object()
+            return [_Segment()], SimpleNamespace(
+                language="hi", language_probability=0.60
+            )
 
     monkeypatch.setitem(
         sys.modules,
@@ -615,7 +753,7 @@ async def test_local_whisper_provider_passes_language_and_transcribe_task(
         model_name="small",
         device="auto",
         compute_type="auto",
-        language="en",
+        language=settings.get_local_whisper_language(),
     )
 
     text = await provider.transcribe(
@@ -626,6 +764,7 @@ async def test_local_whisper_provider_passes_language_and_transcribe_task(
 
     assert text.text == "can you hear me"
     assert text.language == "en"
+    assert text.raw_language == "hi"
     assert _WhisperModel.calls[0]["language"] == "en"
     assert _WhisperModel.calls[0]["task"] == "transcribe"
 

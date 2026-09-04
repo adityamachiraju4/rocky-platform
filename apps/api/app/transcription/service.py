@@ -1,6 +1,8 @@
 """TranscriptionService turns uploaded microphone audio into text."""
 from __future__ import annotations
 
+import re
+
 from app.transcription.provider import (
     TranscriptionProvider,
     TranscriptionProviderError,
@@ -32,6 +34,31 @@ class TranscriptionUnavailableError(RuntimeError):
     """Raised when transcription is unavailable for this deployment."""
 
 
+class TranscriptionNoSpeechError(RuntimeError):
+    """Raised when audio was processed but no speech was recognized."""
+
+
+_NON_SPEECH_MARKERS = frozenset(
+    {
+        "[music]",
+        "(music)",
+        "[silence]",
+        "(silence)",
+        "<|nospeech|>",
+    }
+)
+
+
+def _is_unusable_transcript(text: str) -> bool:
+    """Reject only structurally empty output, preserving short commands."""
+
+    normalized = " ".join(text.split()).lower()
+    if normalized in _NON_SPEECH_MARKERS:
+        return True
+    word_characters = re.findall(r"\w", normalized, flags=re.UNICODE)
+    return len(word_characters) < 2
+
+
 class TranscriptionService:
     def __init__(self, provider: TranscriptionProvider | None) -> None:
         self._provider = provider
@@ -57,13 +84,19 @@ class TranscriptionService:
                 content_type=media_type,
             )
         except TranscriptionProviderError as exc:
+            if exc.code == "empty_transcription":
+                raise TranscriptionNoSpeechError(
+                    "No speech was recognized in the audio."
+                ) from exc
             raise TranscriptionUnavailableError(
                 "Transcription provider failed."
             ) from exc
         if isinstance(result, str):
             result = TranscriptionResult(text=result)
-        if not result.text.strip():
-            raise TranscriptionUnavailableError("Transcription was empty.")
+        if _is_unusable_transcript(result.text):
+            raise TranscriptionNoSpeechError(
+                "No speech was recognized in the audio."
+            )
         return TranscriptionResult(
             text=result.text.strip(),
             language=result.language,

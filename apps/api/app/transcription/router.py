@@ -12,6 +12,7 @@ from app.transcription.schemas import TranscriptionResponse
 from app.transcription.service import (
     MAX_TRANSCRIPTION_AUDIO_BYTES,
     TranscriptionInputError,
+    TranscriptionNoSpeechError,
     TranscriptionUnavailableError,
 )
 
@@ -39,8 +40,14 @@ async def transcribe_audio(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    except TranscriptionNoSpeechError as exc:
+        logger.info("Transcription completed with no recognized speech.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="I didn't catch that clearly. Could you say it again?",
+        ) from exc
     except TranscriptionUnavailableError as exc:
-        logger.warning("Transcription unavailable")
+        logger.warning("Transcription unavailable: reason=%s", str(exc))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Transcription is unavailable.",

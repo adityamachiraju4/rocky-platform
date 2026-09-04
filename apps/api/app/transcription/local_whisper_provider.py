@@ -32,11 +32,27 @@ _ENGLISH_FALLBACK_LANGUAGES = frozenset(
 )
 _LOW_LANGUAGE_CONFIDENCE = 0.65
 _ENGLISH_SCORE_TOLERANCE = 0.15
+_MAX_DIAGNOSTIC_SEGMENTS = 5
+_MAX_DIAGNOSTIC_TEXT_CHARS = 80
 
 
 def extension_for_content_type(content_type: str) -> str:
     media_type = content_type.split(";", 1)[0].strip().lower()
     return _EXTENSIONS_BY_MEDIA_TYPE.get(media_type, ".audio")
+
+
+def _safe_float(value: object) -> float | None:
+    return float(value) if isinstance(value, (float, int)) else None
+
+
+def _safe_segment_text(segment: Any) -> str:
+    text = getattr(segment, "text", "")
+    if not isinstance(text, str):
+        return "<non-string>"
+    rendered = " ".join(text.split())
+    if len(rendered) <= _MAX_DIAGNOSTIC_TEXT_CHARS:
+        return rendered
+    return f"{rendered[:_MAX_DIAGNOSTIC_TEXT_CHARS]}..."
 
 
 class LocalWhisperTranscriptionProvider:
@@ -145,15 +161,22 @@ class LocalWhisperTranscriptionProvider:
         configured_language = (
             None if self._language.strip().lower() == "auto" else self._language
         )
+        audio_duration = None
+        audio_duration_after_vad = None
         segments, info = model.transcribe(
             str(path),
             language=configured_language,
             task="transcribe",
         )
         segments = list(segments)
-        detected_language = getattr(info, "language", None) or configured_language
+        audio_duration = _safe_float(getattr(info, "duration", None))
+        audio_duration_after_vad = _safe_float(
+            getattr(info, "duration_after_vad", None)
+        )
+        provider_language = getattr(info, "language", None)
+        detected_language = configured_language or provider_language
         language_probability = getattr(info, "language_probability", None)
-        raw_language = detected_language
+        raw_language = provider_language or configured_language
         raw_language_probability = language_probability
 
         if self._should_try_english_fallback(
@@ -167,6 +190,10 @@ class LocalWhisperTranscriptionProvider:
                 task="transcribe",
             )
             english_segments = list(english_segments)
+            english_duration = _safe_float(getattr(english_info, "duration", None))
+            english_duration_after_vad = _safe_float(
+                getattr(english_info, "duration_after_vad", None)
+            )
             if self._average_log_probability(english_segments) >= (
                 self._average_log_probability(segments) - _ENGLISH_SCORE_TOLERANCE
             ):
@@ -175,8 +202,13 @@ class LocalWhisperTranscriptionProvider:
                 language_probability = getattr(
                     english_info, "language_probability", None
                 )
+                audio_duration = english_duration
+                audio_duration_after_vad = english_duration_after_vad
 
         text = "".join(segment.text for segment in segments).strip()
+        segment_texts = [_safe_segment_text(segment) for segment in segments]
+        combined_text_length = len(text)
+        blank_after_strip = not bool(text)
         normalized_language_probability = (
             float(language_probability)
             if isinstance(language_probability, (float, int))
@@ -188,7 +220,7 @@ class LocalWhisperTranscriptionProvider:
             else None
         )
         stable_language = (
-            detected_language
+            configured_language
             if configured_language is not None
             else stabilize_transcription_language(
                 text,
@@ -197,12 +229,75 @@ class LocalWhisperTranscriptionProvider:
             )
         )
         logger.info(
-            "Local Whisper inference complete: elapsed_ms=%.1f model=%s",
+            "Local Whisper inference complete: elapsed_ms=%.1f model=%s "
+            "configured_language=%s transcript_language=%s "
+            "detected_language=%s language_probability=%s raw_language=%s "
+            "raw_language_probability=%s segment_count=%d "
+            "combined_transcript_length=%d blank_after_strip=%s "
+            "audio_duration=%s audio_duration_after_vad=%s",
             (time.perf_counter() - started) * 1000,
             self._model_name,
-            extra={"transcription_provider": "local_whisper"},
+            configured_language or "auto",
+            stable_language,
+            detected_language,
+            normalized_language_probability,
+            raw_language,
+            normalized_raw_language_probability,
+            len(segments),
+            combined_text_length,
+            blank_after_strip,
+            audio_duration,
+            audio_duration_after_vad,
+            extra={
+                "transcription_provider": "local_whisper",
+                "configured_language": configured_language or "auto",
+                "transcript_language": stable_language,
+                "detected_language": detected_language,
+                "language_probability": normalized_language_probability,
+                "raw_language": raw_language,
+                "raw_language_probability": normalized_raw_language_probability,
+                "segment_count": len(segments),
+                "segment_texts": segment_texts[:_MAX_DIAGNOSTIC_SEGMENTS],
+                "combined_transcript_length": combined_text_length,
+                "blank_after_strip": blank_after_strip,
+                "audio_duration": audio_duration,
+                "audio_duration_after_vad": audio_duration_after_vad,
+                "provider_return_type": type(segments).__name__,
+                "provider_state": "empty_transcription"
+                if blank_after_strip
+                else "recognized",
+            },
+        )
+        logger.info(
+            "Local Whisper segments diagnostic: segment_count=%d "
+            "segment_texts=%s",
+            len(segments),
+            segment_texts[:_MAX_DIAGNOSTIC_SEGMENTS],
+            extra={
+                "transcription_provider": "local_whisper",
+                "segment_count": len(segments),
+                "segment_texts": segment_texts[:_MAX_DIAGNOSTIC_SEGMENTS],
+            },
         )
         if not text:
+            logger.info(
+                "Local Whisper transcription considered empty: "
+                "reason=blank_after_strip segment_count=%d "
+                "combined_transcript_length=%d detected_language=%s "
+                "language_probability=%s audio_duration=%s "
+                "audio_duration_after_vad=%s",
+                len(segments),
+                combined_text_length,
+                detected_language,
+                normalized_language_probability,
+                audio_duration,
+                audio_duration_after_vad,
+                extra={
+                    "provider_error_code": "empty_transcription",
+                    "transcription_provider": "local_whisper",
+                    "reason": "blank_after_strip",
+                },
+            )
             raise TranscriptionProviderError(
                 "Local Whisper transcription returned empty text.",
                 code="empty_transcription",

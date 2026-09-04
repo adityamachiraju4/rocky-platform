@@ -56,26 +56,61 @@ class FakeSpeechEngine implements BrowserSpeechEngine {
   }
 }
 
-test("non-English automatic fallback waits for voiceschanged and speaks once", async () => {
+test("a backend 503 falls back to an English utterance passed to speak", async () => {
   const engine = new FakeSpeechEngine();
   const value = utterance();
-  const started = startBrowserSpeech({
-    engine,
-    utterance: value,
-    language: "hi",
-    enabled: true,
-    isCurrent: () => true,
-    voiceReadyTimeoutMs: 100,
-  });
+  const backendSpeech = Promise.reject(new Error("503 Service Unavailable"));
+  const started = backendSpeech.catch(() => startBrowserSpeech({
+      engine,
+      utterance: value,
+      language: "en",
+      enabled: true,
+      isCurrent: () => true,
+      voiceReadyTimeoutMs: 100,
+    }));
 
   assert.equal(engine.spoken.length, 0);
-  engine.loadVoices([voice("en-US"), voice("hi-IN", "Hindi")]);
+  engine.loadVoices([voice("hi-IN", "Hindi"), voice("en-US", "English US")]);
 
   assert.equal(await started, "started");
-  assert.equal(value.lang, "hi-IN");
-  assert.equal(value.voice?.name, "Hindi");
+  assert.equal(value.lang, "en-US");
+  assert.equal(value.voice?.name, "English US");
   assert.equal(engine.spoken.length, 1);
+  assert.equal(engine.spoken[0], value);
   assert.equal(engine.cancelled, 0);
+});
+
+test("English fallback prefers en-US over an earlier English voice", async () => {
+  const engine = new FakeSpeechEngine();
+  engine.voices = [voice("en-GB", "English UK"), voice("en-US", "English US")];
+  const value = utterance();
+
+  assert.equal(await startBrowserSpeech({
+    engine,
+    utterance: value,
+    language: "en",
+    enabled: true,
+    isCurrent: () => true,
+  }), "started");
+  assert.equal(value.lang, "en-US");
+  assert.equal(value.voice?.name, "English US");
+});
+
+test("fallback selects the default voice when no English voice exists", async () => {
+  const engine = new FakeSpeechEngine();
+  const defaultVoice = voice("fr-FR", "System Default");
+  Object.defineProperty(defaultVoice, "default", { value: true });
+  engine.voices = [voice("hi-IN", "Hindi"), defaultVoice];
+  const value = utterance();
+
+  assert.equal(await startBrowserSpeech({
+    engine,
+    utterance: value,
+    language: "en",
+    enabled: true,
+    isCurrent: () => true,
+  }), "started");
+  assert.equal(value.voice?.name, "System Default");
 });
 
 test("Replay starts one new utterance after voices are ready", async () => {

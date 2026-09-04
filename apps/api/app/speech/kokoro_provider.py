@@ -13,6 +13,7 @@ import threading
 import time
 import warnings
 
+from app.speech.diagnostics import exception_details
 from app.speech.provider import SpeechAudio, SpeechProviderError
 
 logger = logging.getLogger(__name__)
@@ -38,18 +39,33 @@ class KokoroSpeechProvider:
             raise SpeechProviderError(
                 "Kokoro language is not available in this installation.",
                 code=self.last_error_code,
+                error_type="UnsupportedLanguage",
+                reason=f"Configured Kokoro voice supports English, not {language!r}.",
             )
         try:
             content = await asyncio.to_thread(self._synthesize_sync, text)
         except Exception as exc:  # noqa: BLE001 - provider fallback owns errors
             self.last_error_code = "request_failed"
+            error_type, reason = exception_details(exc)
             logger.warning(
-                "Kokoro speech generation failed",
-                extra={"provider_error_code": self.last_error_code},
+                "Kokoro speech generation failed: error_type=%s reason=%s "
+                "voice=%s",
+                error_type,
+                reason,
+                self._voice,
+                extra={
+                    "speech_provider": "kokoro",
+                    "provider_error_code": self.last_error_code,
+                    "error_type": error_type,
+                    "reason": reason,
+                    "voice": self._voice,
+                },
             )
             raise SpeechProviderError(
                 "Kokoro speech generation failed.",
                 code=self.last_error_code,
+                error_type=error_type,
+                reason=reason,
             ) from exc
 
         if not content:
@@ -57,6 +73,8 @@ class KokoroSpeechProvider:
             raise SpeechProviderError(
                 "Kokoro speech generation returned empty audio.",
                 code=self.last_error_code,
+                error_type="EmptyAudio",
+                reason="Kokoro returned no audio segments.",
             )
         return SpeechAudio(content=content, media_type="audio/wav")
 

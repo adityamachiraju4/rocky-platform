@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -27,6 +28,7 @@ from app.db.base import Base
 from app.main import app as fastapi_app
 from app.models.user import User
 from app.speech.dependencies import get_openai_speech_provider, get_speech_provider
+from app.speech.diagnostics import openai_exception_details, safe_reason
 from app.speech.kokoro_provider import KokoroSpeechProvider
 from app.speech.openai_provider import OpenAISpeechProvider
 from app.speech.provider import (
@@ -364,3 +366,56 @@ async def test_provider_priority_reports_unavailable_when_all_fail() -> None:
 
     with pytest.raises(SpeechProviderError):
         await provider.synthesize("Hello")
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_log_names_provider_and_safe_reason(caplog) -> None:
+    provider = FallbackSpeechProvider(
+        (
+            (
+                "kokoro",
+                _FakeSpeechProvider(
+                    SpeechProviderError(
+                        "local failed",
+                        code="request_failed",
+                        error_type="RuntimeError",
+                        reason="phonemizer executable unavailable",
+                    )
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(SpeechProviderError):
+        await provider.synthesize("Hello")
+
+    assert "provider=kokoro" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+    assert "reason=phonemizer executable unavailable" in caplog.text
+
+
+def test_speech_diagnostics_redact_credentials() -> None:
+    assert "sk-secret-value" not in safe_reason(
+        "Authorization: Bearer sk-secret-value"
+    )
+
+
+def test_openai_speech_error_metadata_reports_quota_category() -> None:
+    error = SimpleNamespace(
+        status_code=429,
+        code="credit_balance_exhausted",
+        body={
+            "error": {
+                "type": "insufficient_quota",
+                "code": "credit_balance_exhausted",
+                "message": "No credits remain.",
+            }
+        },
+    )
+
+    assert openai_exception_details(error) == {
+        "status": 429,
+        "error_type": "insufficient_quota",
+        "error_code": "credit_balance_exhausted",
+        "reason": "No credits remain.",
+    }

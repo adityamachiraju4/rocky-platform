@@ -21,7 +21,9 @@ Environment variables
 * ``LOCAL_WHISPER_MODEL`` — local Whisper model size/name.
 * ``LOCAL_WHISPER_DEVICE`` — local Whisper execution device.
 * ``LOCAL_WHISPER_COMPUTE_TYPE`` — local Whisper compute type.
-* ``LOCAL_WHISPER_LANGUAGE`` — local Whisper transcription language.
+* ``TRANSCRIPTION_LANGUAGE`` — transcription language policy (``en`` release
+  baseline; ``auto`` experimental multilingual detection).
+* ``LOCAL_WHISPER_LANGUAGE`` — legacy alias for transcription language.
 * ``LOCAL_WHISPER_WARMUP`` — warm local Whisper after API startup.
 * ``OPENAI_TRANSCRIPTION_API_KEY`` — optional official OpenAI key for STT.
 * ``OPENAI_TRANSCRIPTION_BASE_URL`` — optional transcription API base URL.
@@ -83,7 +85,7 @@ _DEFAULT_TRANSCRIPTION_PROVIDER = "local"
 _DEFAULT_LOCAL_WHISPER_MODEL = "small"
 _DEFAULT_LOCAL_WHISPER_DEVICE = "auto"
 _DEFAULT_LOCAL_WHISPER_COMPUTE_TYPE = "auto"
-_DEFAULT_LOCAL_WHISPER_LANGUAGE = "auto"
+_DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
 _DEFAULT_LOCAL_WHISPER_WARMUP = True
 _DEFAULT_OPENAI_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
@@ -283,7 +285,11 @@ def get_local_whisper_compute_type() -> str:
 
 
 def get_local_whisper_language() -> str:
-    return os.getenv("LOCAL_WHISPER_LANGUAGE") or _DEFAULT_LOCAL_WHISPER_LANGUAGE
+    return (
+        os.getenv("TRANSCRIPTION_LANGUAGE")
+        or os.getenv("LOCAL_WHISPER_LANGUAGE")
+        or _DEFAULT_TRANSCRIPTION_LANGUAGE
+    ).strip().lower()
 
 
 def get_local_whisper_warmup() -> bool:

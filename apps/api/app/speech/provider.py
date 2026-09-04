@@ -5,15 +5,26 @@ from dataclasses import dataclass, replace
 import logging
 from typing import Protocol
 
+from app.speech.diagnostics import safe_reason
+
 logger = logging.getLogger(__name__)
 
 
 class SpeechProviderError(RuntimeError):
     """Raised when a speech provider cannot safely render audio."""
 
-    def __init__(self, message: str, *, code: str = "provider_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "provider_error",
+        error_type: str | None = None,
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.error_type = error_type or self.__class__.__name__
+        self.reason = safe_reason(reason or message)
 
 
 @dataclass(frozen=True)
@@ -43,10 +54,17 @@ class FallbackSpeechProvider:
             except SpeechProviderError as exc:
                 last_error = exc
                 logger.warning(
-                    "Speech provider failed",
+                    "Speech provider failed: provider=%s error_type=%s "
+                    "error_code=%s reason=%s",
+                    name,
+                    exc.error_type,
+                    exc.code,
+                    exc.reason,
                     extra={
                         "speech_provider": name,
                         "provider_error_code": exc.code,
+                        "error_type": exc.error_type,
+                        "reason": exc.reason,
                     },
                 )
                 continue

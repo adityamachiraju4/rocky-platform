@@ -69,6 +69,8 @@ export function selectBrowserVoice(
   const primary = requested.split("-", 1)[0];
   return voices.find((voice) => voice.lang.toLowerCase() === requested)
     ?? voices.find((voice) => voice.lang.toLowerCase().split("-", 1)[0] === primary)
+    ?? voices.find((voice) => voice.default)
+    ?? voices[0]
     ?? null;
 }
 

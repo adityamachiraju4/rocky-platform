@@ -10,12 +10,14 @@ test("Tamil browser speech uses the regional voice tag", () => {
 });
 
 test("browser speech maps supported language codes to regional voice tags", () => {
+  assert.equal(browserSpeechLanguage("en"), "en-US");
+  assert.equal(browserSpeechLanguage(""), "en-US");
   assert.equal(browserSpeechLanguage("hi"), "hi-IN");
   assert.equal(browserSpeechLanguage("te"), "te-IN");
   assert.equal(browserSpeechLanguage("es"), "es-ES");
 });
 
-test("unknown and already regional browser speech tags remain unchanged", () => {
-  assert.equal(browserSpeechLanguage("en"), "en");
+test("English regional variants use the release voice while other tags remain unchanged", () => {
+  assert.equal(browserSpeechLanguage("en-GB"), "en-US");
   assert.equal(browserSpeechLanguage("te-IN"), "te-IN");
 });

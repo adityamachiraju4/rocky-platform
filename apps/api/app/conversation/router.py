@@ -32,12 +32,18 @@ async def converse(
 ) -> ConversationResponse:
     started = time.perf_counter()
     try:
-        return await service.handle(
+        response = await service.handle(
             current_user,
             payload.message,
             timezone_name=payload.timezone,
             language=payload.language,
         )
+        logger.info(
+            "Conversation response selected: selected_response_language=%s",
+            response.language,
+            extra={"selected_response_language": response.language},
+        )
+        return response
     except UnknownActionError as exc:
         # The resolver proposed something outside the closed registry. This is
         # never the caller's fault; surface it as an internal error.
