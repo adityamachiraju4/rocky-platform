@@ -93,6 +93,7 @@ narrow development-only exception and remove it before release.
 - `@capacitor/app`: foreground/background/resume lifecycle cleanup.
 - `@capacitor/device`: native login device metadata.
 - `@capacitor/network`: online/offline state.
+- `@capacitor/geolocation`: explicit, per-request location permission.
 - `@capacitor/preferences`: native storage bridge for durable refresh tokens.
 - `@capacitor/push-notifications`: permission and token foundation.
 - `@capacitor/status-bar`: native status bar styling.
@@ -114,6 +115,17 @@ plugin or a first-party secure token strategy.
 
 The server refresh rotation and logout/session invalidation model is unchanged.
 
+## Location Privacy
+
+Rocky requests location only when the user's message needs local context and
+does not already name a place, for example weather today or restaurants near me.
+Coordinates are rounded before sending, attached to that one conversation turn,
+and are not stored in frontend state or backend history. If permission is
+denied or unavailable, Rocky asks the user to include a city or place in text.
+
+Provider secrets stay server-side. The backend accepts ephemeral
+`location_context` and passes coordinates only into live weather/places lookups
+when the live intent has no explicit location.
 
 ## Lifecycle, Voice, and Offline
 

@@ -5,4 +5,5 @@
     <string name="package_name">com.phredsec.rocky</string>
     <string name="custom_url_scheme">com.phredsec.rocky</string>
     <string name="microphone_permission_reason">Rocky uses the microphone so you can speak to your assistant.</string>
+    <string name="location_permission_reason">Rocky uses your approximate location only when a request needs local context, like weather or nearby places.</string>
 </resources>

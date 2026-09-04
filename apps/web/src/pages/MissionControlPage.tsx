@@ -5,8 +5,9 @@ import { ApiError, AuthExpiredError, sendConversation, synthesizeSpeech, transcr
 import { useResource } from "../useApi";
 import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
 import { humanizeEvent } from "../activityLabels";
-import type { ConversationResponse, Reminder } from "../types";
+import type { ConversationResponse, DeviceLocationContext, Reminder } from "../types";
 import { startBrowserSpeech, type BrowserSpeechStartResult } from "../browserSpeech";
+import { needsDeviceLocation, requestDeviceLocationContext } from "../locationContext";
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -634,6 +635,7 @@ function RockyInteraction({
     id: number,
     controller: AbortController,
     language?: string | null,
+    locationContext?: DeviceLocationContext | null,
   ) => {
     setInteractionState("thinking");
     const conversationStartedAt = performance.now();
@@ -643,6 +645,7 @@ function RockyInteraction({
         message: text,
         timezone: browserTimezone(),
         language,
+        location_context: locationContext,
       }, controller.signal);
       if (!isCurrentTurn(id, controller)) return;
       speechDebug("conversation response", {
@@ -681,6 +684,15 @@ function RockyInteraction({
       setError("Rocky needs the backend for that. Please reconnect and try again.");
       return;
     }
+    let locationContext: DeviceLocationContext | null = null;
+    if (needsDeviceLocation(text)) {
+      const location = await requestDeviceLocationContext();
+      if (location.status !== "granted" || !location.context) {
+        setError("Please include a city or place in your message so Rocky can answer without device location.");
+        return;
+      }
+      locationContext = location.context;
+    }
     const turn = beginTurn();
     if (!turn) return;
     stopRockySpeech();
@@ -690,7 +702,7 @@ function RockyInteraction({
     window.requestAnimationFrame(resizeComposer);
     const rect = inputRef.current?.getBoundingClientRect();
     followResponseRef.current = !rect || (rect.bottom >= 0 && rect.top <= window.innerHeight);
-    await runConversation(text, turn.id, turn.controller);
+    await runConversation(text, turn.id, turn.controller, null, locationContext);
   };
 
   const submitTranscription = async (audio: Blob, filename: string) => {
@@ -712,7 +724,17 @@ function RockyInteraction({
         setInteractionState("idle");
         return;
       }
-      await runConversation(text, turn.id, turn.controller, result.language);
+      let locationContext: DeviceLocationContext | null = null;
+      if (needsDeviceLocation(text)) {
+        const location = await requestDeviceLocationContext();
+        if (location.status !== "granted" || !location.context) {
+          setVoiceError("Please say a city or place so Rocky can answer without device location.");
+          setInteractionState("idle");
+          return;
+        }
+        locationContext = location.context;
+      }
+      await runConversation(text, turn.id, turn.controller, result.language, locationContext);
     } catch (e: unknown) {
       if (!isCurrentTurn(turn.id, turn.controller)) return;
       if (e instanceof AuthExpiredError) {

@@ -51,8 +51,10 @@ from app.notes.schemas import NoteCreate, NoteUpdate
 from app.notes.service import NotesService
 from app.lists.schemas import ListCreate, ListItemCreate, ListItemUpdate, ListUpdate
 from app.lists.service import ListsService
+from app.live import registry as live_registry
 from app.live.responder import render_live_result
 from app.live.service import LiveIntelligenceService
+from app.live.intent import LiveIntent
 
 from app.conversation import registry
 from app.conversation.context import (
@@ -86,7 +88,7 @@ from app.conversation.resolver import (
     TaskRef,
     WorldView,
 )
-from app.conversation.schemas import ConversationResponse, ResolvedAction
+from app.conversation.schemas import ConversationResponse, LocationContext, ResolvedAction
 from app.conversation.responder import (
     Outcome,
     RecallFact,
@@ -152,6 +154,32 @@ _LIVE_INFORMATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+
+
+def _with_location_context(
+    intent: LiveIntent,
+    location_context: LocationContext | None,
+) -> LiveIntent:
+    if location_context is None or intent.tool_name not in {
+        live_registry.WEATHER_CURRENT,
+        live_registry.WEATHER_FORECAST,
+        live_registry.PLACES_SEARCH,
+    }:
+        return intent
+
+    current_location = str(intent.arguments.get("location") or "").strip()
+    if current_location:
+        return intent
+
+    return LiveIntent(
+        intent.tool_name,
+        {
+            **intent.arguments,
+            "location": "Current location",
+            "latitude": location_context.latitude,
+            "longitude": location_context.longitude,
+        },
+    )
 
 
 def _target_type_for_action(
@@ -294,6 +322,7 @@ class ConversationService:
         message: str,
         timezone_name: str | None = None,
         language: str | None = None,
+        location_context: LocationContext | None = None,
     ) -> ConversationResponse:
         turn_language = response_language(message, language)
         resolver_message = normalize_capability_message(message)
@@ -312,6 +341,7 @@ class ConversationService:
             if self._live_service is not None:
                 live_intent = self._live_service.resolve(message)
                 if live_intent is not None:
+                    live_intent = _with_location_context(live_intent, location_context)
                     live_result = await self._live_service.execute(live_intent)
                     return ConversationResponse(
                         executed=False,

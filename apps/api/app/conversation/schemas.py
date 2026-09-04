@@ -52,6 +52,16 @@ class ConversationRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     timezone: str | None = Field(default=None, max_length=128)
     language: str | None = Field(default=None, min_length=2, max_length=35)
+    location_context: "LocationContext | None" = None
+
+
+class LocationContext(BaseModel):
+    """Ephemeral client-provided device location for one live lookup only."""
+
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy_meters: int | None = Field(default=None, ge=0, le=100_000)
+    source: str = Field(min_length=3, max_length=20)
 
 
 class ConversationResponse(BaseModel):

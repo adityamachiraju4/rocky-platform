@@ -14,6 +14,8 @@ class StrictLiveModel(BaseModel):
 class WeatherArgs(StrictLiveModel):
     location: str = Field(min_length=2, max_length=120)
     window: Literal["current", "today", "tonight", "tomorrow", "short"] = "current"
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class NewsArgs(StrictLiveModel):
@@ -47,6 +49,8 @@ class PlacesArgs(StrictLiveModel):
     location: str = Field(min_length=2, max_length=120)
     radius_meters: int = Field(default=3000, ge=100, le=10000)
     max_results: int = Field(default=5, ge=1, le=5)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
 
 
 class TimeArgs(StrictLiveModel):

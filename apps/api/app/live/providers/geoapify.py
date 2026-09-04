@@ -29,12 +29,15 @@ class GeoapifyPlacesProvider:
         category = _category_for(args.query)
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
-                geocoded = await client.get(
-                    "https://api.geoapify.com/v1/geocode/search",
-                    params={"text": args.location, "limit": 1, "apiKey": self._api_key},
-                )
-                geocoded.raise_for_status()
-                lat, lon = _coordinates(geocoded.json())
+                if args.latitude is not None and args.longitude is not None:
+                    lat, lon = args.latitude, args.longitude
+                else:
+                    geocoded = await client.get(
+                        "https://api.geoapify.com/v1/geocode/search",
+                        params={"text": args.location, "limit": 1, "apiKey": self._api_key},
+                    )
+                    geocoded.raise_for_status()
+                    lat, lon = _coordinates(geocoded.json())
                 response = await client.get(
                     "https://api.geoapify.com/v2/places",
                     params={

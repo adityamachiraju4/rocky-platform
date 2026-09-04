@@ -102,6 +102,14 @@ export interface ConversationRequest {
   message: string;
   timezone?: string | null;
   language?: string | null;
+  location_context?: DeviceLocationContext | null;
+}
+
+export interface DeviceLocationContext {
+  latitude: number;
+  longitude: number;
+  accuracy_meters?: number | null;
+  source: "native" | "web";
 }
 
 export interface ConversationResponse {

@@ -43,7 +43,14 @@ class OpenMeteoWeatherProvider:
 
     async def weather(self, args: WeatherArgs) -> WeatherReport:
         retrieved_at = datetime.now(timezone.utc)
-        latitude, longitude, resolved_name = await self._geocode(args.location)
+        if args.latitude is not None and args.longitude is not None:
+            latitude, longitude, resolved_name = (
+                args.latitude,
+                args.longitude,
+                args.location,
+            )
+        else:
+            latitude, longitude, resolved_name = await self._geocode(args.location)
         data = await self._forecast(latitude, longitude)
         return _normalize_weather(args, data, resolved_name, retrieved_at)
 

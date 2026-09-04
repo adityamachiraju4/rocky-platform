@@ -11,6 +11,7 @@
 - Final app icon and splash/launch artwork.
 - iPhone screenshots.
 - Microphone purpose copy.
+- Location purpose copy.
 - Privacy manifest and App Privacy questionnaire.
 - Encryption/export compliance review.
 - TestFlight build upload.
@@ -28,6 +29,7 @@
 - Privacy policy URL.
 - Data Safety form.
 - Microphone permission disclosure.
+- Location permission disclosure.
 - Internal testing track.
 - Production rollout plan.
 
@@ -40,7 +42,7 @@
 - Staging HTTPS backend URL for pre-release builds.
 - No provider keys in frontend or native bundles.
 - Server-side optional provider keys:
-  `NEWS_API_KEY`, `TAVILY_API_KEY`, `FINNHUB_API_KEY`.
+  `NEWS_API_KEY`, `TAVILY_API_KEY`, `FINNHUB_API_KEY`, `GEOAPIFY_API_KEY`.
 - Production sports-provider decision.
 - Push backend device-token registration.
 - APNs key/certificate setup.
@@ -54,6 +56,8 @@
 - Background and foreground on Mission Control while idle.
 - Start recording, background the app, and confirm recording cancels cleanly.
 - Ask a typed weather request with an explicit city.
+- Ask `What's the weather today?`, grant location, and confirm a weather reply.
+- Deny location, retry a local request, and confirm Rocky asks for a city/place.
 - Toggle Spoken Replies and use Replay.
 - Kill and relaunch the app; confirm session boot behavior.
 - Turn network off and confirm backend requests show an offline state.
@@ -67,6 +71,9 @@
 - Use hardware/system Back from More menu, detail pages, and root.
 - Confirm keyboard resize keeps the Mission Control composer and Send usable.
 - Start recording, background the app, and confirm recording cancels cleanly.
+- Ask `restaurants near me`, grant approximate location, and confirm places flow
+  reaches the backend when Geoapify is configured.
+- Deny location and confirm Rocky asks for a city/place.
 - Turn network off and confirm offline state.
 - Reconnect and confirm no duplicate request is sent.
 - Build a release `.aab` once Play signing and backend URLs are configured.

@@ -37,6 +37,7 @@ async def converse(
             payload.message,
             timezone_name=payload.timezone,
             language=payload.language,
+            location_context=payload.location_context,
         )
         logger.info(
             "Conversation response selected: selected_response_language=%s",

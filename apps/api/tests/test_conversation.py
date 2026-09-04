@@ -1615,6 +1615,89 @@ async def test_live_provider_failure_is_honest_and_does_not_fallback_to_model(ct
 
 
 @pytest.mark.asyncio
+async def test_live_weather_uses_ephemeral_device_location_when_needed(ctx) -> None:
+    live = _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            WeatherReport(
+                location="Current location",
+                window="current",
+                temperature_c=26.0,
+                condition="clear",
+                source=SourceMetadata(
+                    provider="fake-weather",
+                    retrieved_at=datetime.now(timezone.utc),
+                    freshness="test",
+                ),
+            ),
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={
+            "message": "What's the weather today?",
+            "location_context": {
+                "latitude": 12.971,
+                "longitude": 77.594,
+                "accuracy_meters": 900,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "weather.current"
+    intent = live.executed[0]
+    assert intent.arguments["location"] == "Current location"
+    assert intent.arguments["latitude"] == 12.971
+    assert intent.arguments["longitude"] == 77.594
+
+
+@pytest.mark.asyncio
+async def test_live_weather_does_not_override_explicit_location(ctx) -> None:
+    live = _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            WeatherReport(
+                location="Hyderabad, India",
+                window="current",
+                temperature_c=29.0,
+                source=SourceMetadata(
+                    provider="fake-weather",
+                    retrieved_at=datetime.now(timezone.utc),
+                    freshness="test",
+                ),
+            ),
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={
+            "message": "What's the weather in Hyderabad?",
+            "location_context": {
+                "latitude": 12.971,
+                "longitude": 77.594,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    intent = live.executed[0]
+    assert intent.arguments["location"] == "Hyderabad"
+    assert "latitude" not in intent.arguments
+    assert "longitude" not in intent.arguments
+
+
+@pytest.mark.asyncio
 async def test_evergreen_general_question_still_uses_general_assistant(ctx) -> None:
     provider = _use_fake_provider(
         ConversationTurn(
