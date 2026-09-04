@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./useAuth";
+import BrandMark from "./components/BrandMark";
+import Onboarding from "./components/Onboarding";
 
 type IconName = "home" | "projects" | "tasks" | "reminders" | "notes" | "lists" | "activity" | "settings" | "more" | "notifications" | "signout";
 
@@ -79,7 +81,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="shell">
       <nav className="rail" aria-label="Primary navigation">
-        <div className="rail-brand" aria-label="Rocky"><span className="rail-brand-word">ROCKY</span></div>
+        <div className="rail-brand" aria-label="Rocky OS"><BrandMark compact /><span className="rail-brand-word">Rocky</span><small>OS</small></div>
         <div className="rail-nav">
           {navigation.map((item) => (
             <NavLink
@@ -103,7 +105,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </div>
       </nav>
       <header className="mobile-topbar">
-        <span className="mobile-brand">ROCKY</span>
+        <span className="mobile-brand"><BrandMark compact />Rocky</span>
         <strong>{pageTitle(location.pathname)}</strong>
       </header>
       <main className="content">{children}</main>
@@ -129,6 +131,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           )}
         </div>
       </nav>
+      <Onboarding />
     </div>
   );
 }

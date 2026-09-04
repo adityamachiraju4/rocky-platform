@@ -1183,7 +1183,7 @@ function SummaryCards({ data }: { data: MissionControlData }) {
   ];
 
   return (
-    <section className="mc-summary" aria-label="Mission summary">
+    <section className="mc-summary" aria-label="Today at a glance">
       {cards.map((card) => {
         const content = (
           <>
@@ -1216,8 +1216,8 @@ function ResumePanel({ data }: { data: MissionControlData }) {
 
   return (
     <section className="mc-panel mc-resume" aria-label="Resume">
-      <SectionHeading title="Resume" />
-      <p className="mc-panel-subtitle">Continue where you left off</p>
+      <SectionHeading title="Continue" />
+      <p className="mc-panel-subtitle">Pick up where you left off</p>
       {data.errors.work ? (
         <p className="mc-panel-error">Projects and tasks are temporarily unavailable.</p>
       ) : candidate ? (
@@ -1245,8 +1245,8 @@ function FocusPanel({ data }: { data: MissionControlData }) {
   const empty = reminders.length === 0 && tasks.length === 0;
 
   return (
-    <section className="mc-panel mc-focus" aria-label="Today's Focus">
-      <SectionHeading title="Today's Focus" />
+    <section className="mc-panel mc-focus" aria-label="Today">
+      <SectionHeading title="Today" />
       {(data.errors.work || data.errors.reminders) && empty ? (
         <p className="mc-panel-error">Focus items are temporarily unavailable.</p>
       ) : empty ? (

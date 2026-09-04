@@ -1,12 +1,30 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import AppShell from "../AppShell";
-import { createProject, listProjects } from "../api";
+import { createProject, listProjects, listTasks } from "../api";
 import { useResource } from "../useApi";
-import type { Project } from "../types";
+import type { Project, Task } from "../types";
+
+interface ProjectOverview { project: Project; tasks: Task[] }
+
+async function loadProjects(): Promise<ProjectOverview[]> {
+  const projects = await listProjects();
+  const taskLists = await Promise.all(projects.map((project) => listTasks(project.id)));
+  return projects.map((project, index) => ({ project, tasks: taskLists[index] }));
+}
+
+function relativeUpdate(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return "Updated recently";
+  const days = Math.floor((Date.now() - timestamp) / 86_400_000);
+  if (days <= 0) return "Updated today";
+  if (days === 1) return "Updated yesterday";
+  if (days < 7) return `Updated ${days} days ago`;
+  return `Updated ${new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
 
 export default function ProjectsPage() {
-  const { data, loading, error, reload } = useResource<Project[]>(listProjects);
+  const { data, loading, error, reload } = useResource<ProjectOverview[]>(loadProjects);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -29,8 +47,9 @@ export default function ProjectsPage() {
 
   return (
     <AppShell>
-      <header className="page-head">
-        <h1>Projects</h1>
+      <header className="page-head page-head-split">
+        <div><p className="page-kicker">In motion</p><h1>Projects</h1></div>
+        <span className="pill">{data?.filter(({ project }) => project.status === "active").length ?? 0} active</span>
       </header>
 
       <div className="create-row">
@@ -53,15 +72,17 @@ export default function ProjectsPage() {
       {data && data.length === 0 && <p className="muted">No projects yet.</p>}
 
       <ul className="rows project-rows">
-        {data?.map((p) => (
-          <li key={p.id} className="row">
-            <Link to={`/projects/${p.id}`} className="row-main">
-              <span className="row-title">{p.name}</span>
-              {p.description && <span className="row-sub">{p.description}</span>}
+        {data?.map(({ project, tasks }) => {
+          const next = tasks.find((task) => task.status === "active");
+          return <li key={project.id} className="row project-row">
+            <Link to={`/projects/${project.id}`} className="row-main">
+              <span className="row-title">{project.name}</span>
+              <span className="row-sub">{next ? `Next · ${next.title}` : project.description || "No open tasks"}</span>
+              <span className="project-updated">{relativeUpdate(project.updated_at)}</span>
             </Link>
-            <span className="pill">{p.status}</span>
-          </li>
-        ))}
+            <span className="pill">{project.status}</span>
+          </li>;
+        })}
       </ul>
     </AppShell>
   );

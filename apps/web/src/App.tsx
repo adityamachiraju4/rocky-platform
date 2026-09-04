@@ -51,6 +51,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/mission-control"
+        element={
+          <RequireAuth>
+            <MissionControlPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/projects"
         element={
           <RequireAuth>

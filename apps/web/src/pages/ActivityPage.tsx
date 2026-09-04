@@ -35,8 +35,8 @@ export default function ActivityPage() {
           return (
             <li key={a.id} className="ledger-row">
               <span className="ledger-label">{humanizeEvent(a.event_type)}</span>
-              {summary && <span className="ledger-summary mono">{summary}</span>}
-              <time className="ledger-time mono" dateTime={a.created_at}>{formatTime(a.created_at)}</time>
+              {summary && <span className="ledger-summary">{summary}</span>}
+              <time className="ledger-time" dateTime={a.created_at}>{formatTime(a.created_at)}</time>
             </li>
           );
         })}
