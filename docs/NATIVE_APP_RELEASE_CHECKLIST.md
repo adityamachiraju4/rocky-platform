@@ -36,7 +36,7 @@
 ## Backend And Provider Setup
 
 - Production HTTPS Rocky backend URL:
-  `https://rocky-platform-production.up.railway.app`.
+  `https://api.rockyos.in`.
 - Production frontend origin in API `CORS_ALLOWED_ORIGINS` once the web/PWA
   hosting domain is chosen.
 - Staging HTTPS backend URL for pre-release builds.

@@ -29,15 +29,15 @@ npm run android
 ```
 
 `npm run build` is the web/PWA production build and defaults to Rocky's
-deployed Railway API when `VITE_API_BASE_URL` is unset. Local `npm run dev`
+canonical production API when `VITE_API_BASE_URL` is unset. Local `npm run dev`
 keeps the `/api` proxy default.
 `npm run build:native`, `npm run native:sync`, and
 `npm run native:sync:android` require `VITE_API_BASE_URL` and refuse to build a
 native bundle that would send backend calls to Capacitor's local
 `https://localhost` WebView origin.
 `npm run build:native:release` and `npm run native:sync:android:release`
-default to Rocky's deployed Railway API and require HTTPS if an override is
-provided.
+default to `https://api.rockyos.in` and require that canonical HTTPS origin if
+an override is provided.
 
 `npm run ios` and `npm run android` open the native IDEs after a native web
 build and Capacitor sync.
@@ -48,7 +48,7 @@ The frontend resolves API requests through `VITE_API_BASE_URL`.
 
 - Web/PWA development default: `/api`, proxied by Vite to local FastAPI.
 - Web/PWA production default:
-  `https://rocky-platform-production.up.railway.app`.
+  `https://api.rockyos.in`.
 - Native local Android emulator testing: run FastAPI on the host and set
   `VITE_API_BASE_URL` to an explicit backend origin reachable from the emulator.
   The Android emulator reaches the host machine at `10.0.2.2`; for example:
@@ -80,7 +80,7 @@ The frontend resolves API requests through `VITE_API_BASE_URL`.
   trusts user-installed CAs only in debug builds. Release builds do not include
   that overlay and use Android system trust only.
 - Production native builds: run `npm run native:sync:android:release`, which
-  defaults to `https://rocky-platform-production.up.railway.app`. If
+  defaults to `https://api.rockyos.in`. If
   `VITE_API_BASE_URL` is set for a native release build, it must be exactly that
   HTTPS origin.
 
