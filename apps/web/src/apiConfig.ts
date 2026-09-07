@@ -1,5 +1,5 @@
 const DEFAULT_API_BASE = "/api";
-export const PRODUCTION_API_BASE = "https://rocky-platform-production.up.railway.app";
+export const PRODUCTION_API_BASE = "https://api.rockyos.in";
 const CAPACITOR_LOCAL_ORIGINS = new Set(["http://localhost", "https://localhost"]);
 
 interface ApiBaseOptions {
@@ -34,12 +34,17 @@ export function apiBaseUrl(
   const native = options.native ?? isRuntimeNative();
   const mode = options.mode ?? buildMode();
   const prod = options.prod ?? isProductionBuild();
+  // Native mode is the explicit emulator/debug build, even when Vite sets PROD.
+  if (mode === "native-release" || (prod && mode !== "native")) {
+    if (configured && trimTrailingSlash(configured) !== PRODUCTION_API_BASE) {
+      throw new Error(`Production VITE_API_BASE_URL must be ${PRODUCTION_API_BASE}.`);
+    }
+    return PRODUCTION_API_BASE;
+  }
   if (!configured) {
     if (native) {
-      if (mode === "native-release") return PRODUCTION_API_BASE;
       throw new Error("Native API base requires VITE_API_BASE_URL with an absolute Rocky backend URL.");
     }
-    if (prod) return PRODUCTION_API_BASE;
     return DEFAULT_API_BASE;
   }
 

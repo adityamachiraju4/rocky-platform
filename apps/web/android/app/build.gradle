@@ -60,7 +60,7 @@ tasks.register('verifyRockyReleaseWebConfig') {
             throw new GradleException('Release web assets are missing. Run npm run native:sync:android:release before bundleRelease.')
         }
 
-        def releaseApiBase = 'https://rocky-platform-production.up.railway.app'
+        def releaseApiBase = 'https://api.rockyos.in'
         def forbiddenApiBases = [
             '10.0.2.2'
         ]

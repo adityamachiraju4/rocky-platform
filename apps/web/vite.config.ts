@@ -4,7 +4,7 @@ import { defineConfig } from 'vite'
 import { loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
-import { PRODUCTION_API_BASE } from './src/apiConfig.js'
+import { apiBaseUrl } from './src/apiConfig.js'
 
 function loadDeviceHttps(mode: string) {
   if (mode !== 'device') return undefined
@@ -24,42 +24,17 @@ function loadDeviceHttps(mode: string) {
   }
 }
 
-function validateNativeApiBase(mode: string) {
-  if (mode !== 'native' && mode !== 'native-release') return
-
-  const env = loadEnv(mode, process.cwd(), 'VITE_')
-  const apiBase = env.VITE_API_BASE_URL?.trim()
-  const release = mode === 'native-release' || env.VITE_ANDROID_RELEASE === 'true'
-  if (!apiBase) {
-    if (release) return
-    throw new Error('Native builds require VITE_API_BASE_URL with an absolute Rocky backend URL.')
-  }
-
-  let url: URL
-  try {
-    url = new URL(apiBase)
-  } catch {
-    throw new Error('Native VITE_API_BASE_URL must be an absolute Rocky backend URL.')
-  }
-
-  if (release) {
-    if (url.protocol !== 'https:') {
-      throw new Error('Native release VITE_API_BASE_URL must use HTTPS.')
-    }
-    if (url.origin !== PRODUCTION_API_BASE || url.pathname.replace(/\/+$/, '') !== '') {
-      throw new Error(`Native release VITE_API_BASE_URL must be ${PRODUCTION_API_BASE}.`)
-    }
-  } else if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error('Native VITE_API_BASE_URL must use http or https.')
-  }
-  if (url.origin === 'https://localhost' || url.origin === 'http://localhost') {
-    throw new Error("Native VITE_API_BASE_URL must not use Capacitor's local localhost WebView origin.")
-  }
-}
-
 // https://vite.dev/config/
-export default defineConfig(({ mode }) => {
-  validateNativeApiBase(mode)
+export default defineConfig(({ mode, command }) => {
+  const native = mode === 'native' || mode === 'native-release'
+  if (command === 'build' || native) {
+    const env = loadEnv(mode, process.cwd(), 'VITE_')
+    apiBaseUrl(env.VITE_API_BASE_URL, {
+      native,
+      mode: native && env.VITE_ANDROID_RELEASE === 'true' ? 'native-release' : mode,
+      prod: command === 'build',
+    })
+  }
   const deviceMode = mode === 'device'
   const https = loadDeviceHttps(mode)
   const proxy = {
