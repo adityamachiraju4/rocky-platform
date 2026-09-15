@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.core.time import ensure_utc, resolve_timezone
+from app.core.time import ensure_utc, normalize_timezone
 
 
 class ReminderCreate(BaseModel):
@@ -21,10 +22,12 @@ class ReminderCreate(BaseModel):
     def validate_due_at(cls, value: datetime) -> datetime:
         return ensure_utc(value)
 
-    @field_validator("timezone")
+    @field_validator("timezone", mode="before")
     @classmethod
-    def validate_timezone(cls, value: str | None) -> str | None:
-        return resolve_timezone(value).key if value is not None else None
+    def validate_timezone(cls, value: Any) -> Any:
+        if value is None or not isinstance(value, str):
+            return value
+        return normalize_timezone(value)
 
 
 class ReminderRead(BaseModel):

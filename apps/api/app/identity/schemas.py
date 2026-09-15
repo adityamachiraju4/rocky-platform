@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.core.time import resolve_timezone
+from app.core.time import normalize_timezone
 
 
-def _validated_timezone(value: str | None) -> str | None:
-    return resolve_timezone(value).key if value is not None else None
+def _validated_timezone(value: Any) -> Any:
+    if value is None or not isinstance(value, str):
+        return value
+    return normalize_timezone(value)
 
 
 class UserCreate(BaseModel):
@@ -22,7 +25,9 @@ class UserCreate(BaseModel):
     full_name: str | None = Field(default=None, max_length=255)
     timezone: str = Field(default="UTC", max_length=64)
 
-    _validate_timezone = field_validator("timezone")(_validated_timezone)
+    _validate_timezone = field_validator("timezone", mode="before")(
+        _validated_timezone
+    )
 
 
 class UserUpdate(BaseModel):
@@ -30,7 +35,9 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     timezone: str | None = Field(default=None, max_length=64)
 
-    _validate_timezone = field_validator("timezone")(_validated_timezone)
+    _validate_timezone = field_validator("timezone", mode="before")(
+        _validated_timezone
+    )
 
 
 class UserRead(BaseModel):

@@ -10,6 +10,7 @@ import CommandCenterPanels from "../components/CommandCenterPanels";
 import type { ConversationResponse, DeviceLocationContext, Reminder } from "../types";
 import { startBrowserSpeech, type BrowserSpeechStartResult } from "../browserSpeech";
 import { needsDeviceLocation, requestDeviceLocationContext } from "../locationContext";
+import { browserTimezone } from "../format";
 import {
   evaluateVoiceActivityLevel,
   inspectVoiceActivityLevel,
@@ -135,14 +136,6 @@ function stateCopy(state: InteractionState): { label: string; detail: string } {
       return { label: "Speaking", detail: "Rocky is speaking" };
     case "idle":
       return { label: "Ready", detail: "Rocky is ready when you are" };
-  }
-}
-
-function browserTimezone(): string | null {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
-  } catch {
-    return null;
   }
 }
 

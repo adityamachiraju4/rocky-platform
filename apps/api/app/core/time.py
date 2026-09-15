@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
+from importlib import resources
+from pathlib import Path
 from typing import Protocol
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError
 
 UTC = timezone.utc
 
@@ -46,11 +49,51 @@ class FrozenClock:
         return ensure_utc(self.current)
 
 
-def resolve_timezone(name: str) -> ZoneInfo:
+@lru_cache(maxsize=1)
+def _timezone_aliases() -> dict[str, str]:
+    """Read canonical IANA links from the timezone database in use."""
+    aliases = {
+        "Asia/Calcutta": "Asia/Kolkata",
+        # Rocky has always used UTC as its stable default and public value.
+        "UTC": "UTC",
+    }
+    sources = [Path(root, "tzdata.zi") for root in TZPATH]
     try:
-        return ZoneInfo(name)
+        sources.append(resources.files("tzdata.zoneinfo").joinpath("tzdata.zi"))
+    except ModuleNotFoundError:
+        pass
+
+    for source in sources:
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            continue
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] in {"L", "Link"}:
+                aliases.setdefault(parts[2], parts[1])
+        break
+    return aliases
+
+
+def normalize_timezone(name: str) -> str:
+    """Validate an IANA timezone and return its canonical identifier."""
+    cleaned = name.strip()
+    aliases = _timezone_aliases()
+    canonical = cleaned
+    seen: set[str] = set()
+    while canonical in aliases and canonical not in seen:
+        seen.add(canonical)
+        canonical = aliases[canonical]
+    try:
+        ZoneInfo(canonical)
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise InvalidTimezoneError(f"Unknown IANA timezone: {name!r}") from exc
+    return canonical
+
+
+def resolve_timezone(name: str) -> ZoneInfo:
+    return ZoneInfo(normalize_timezone(name))
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -103,4 +146,3 @@ def utc_to_local(value: datetime, timezone_name: str) -> datetime:
 
 
 system_clock = SystemClock()
-

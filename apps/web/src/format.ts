@@ -1,6 +1,22 @@
+const PREFERRED_TIMEZONE_NAMES: Readonly<Record<string, string>> = {
+  "Asia/Calcutta": "Asia/Kolkata",
+};
+
+export function normalizeTimezone(value: string | null | undefined): string | null {
+  const cleaned = value?.trim();
+  if (!cleaned) return null;
+  try {
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: cleaned })
+      .resolvedOptions().timeZone;
+    return PREFERRED_TIMEZONE_NAMES[resolved] ?? PREFERRED_TIMEZONE_NAMES[cleaned] ?? resolved;
+  } catch {
+    return null;
+  }
+}
+
 export function browserTimezone(): string | null {
   try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    return normalizeTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
   } catch {
     return null;
   }

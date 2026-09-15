@@ -11,6 +11,7 @@ from app.core.time import (
     NonexistentLocalTimeError,
     ensure_utc,
     local_datetime_to_utc,
+    normalize_timezone,
     resolve_timezone,
     utc_to_local,
 )
@@ -54,3 +55,23 @@ def test_ambiguous_dst_time_requires_explicit_fold() -> None:
 def test_unknown_timezone_is_rejected() -> None:
     with pytest.raises(InvalidTimezoneError):
         resolve_timezone("Mars/Olympus_Mons")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Asia/Calcutta", "Asia/Kolkata"),
+        (" Asia/Kolkata ", "Asia/Kolkata"),
+        ("America/New_York", "America/New_York"),
+        ("US/Eastern", "America/New_York"),
+        ("UTC", "UTC"),
+    ],
+)
+def test_timezone_names_are_normalized(value: str, expected: str) -> None:
+    assert normalize_timezone(value) == expected
+    assert resolve_timezone(value).key == expected
+
+
+def test_invalid_timezone_name_is_rejected_by_normalizer() -> None:
+    with pytest.raises(InvalidTimezoneError):
+        normalize_timezone("Mars/Olympus")

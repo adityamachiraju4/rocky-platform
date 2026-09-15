@@ -76,6 +76,44 @@ async def test_create_user_201_no_hash(client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_user_normalizes_legacy_timezone(client) -> None:
+    payload = _payload()
+    payload["timezone"] = "Asia/Calcutta"
+    created = await client.post("/identity/users", json=payload)
+
+    assert created.status_code == 201
+    assert created.json()["timezone"] == "Asia/Kolkata"
+
+    user_id = created.json()["id"]
+    stored = await client.get(f"/identity/users/{user_id}")
+    assert stored.status_code == 200
+    assert stored.json()["timezone"] == "Asia/Kolkata"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timezone_name", ["Asia/Kolkata", "America/New_York"])
+async def test_create_user_preserves_canonical_timezone(
+    client, timezone_name: str
+) -> None:
+    payload = _payload()
+    payload["timezone"] = timezone_name
+    created = await client.post("/identity/users", json=payload)
+
+    assert created.status_code == 201
+    assert created.json()["timezone"] == timezone_name
+
+
+@pytest.mark.asyncio
+async def test_create_user_rejects_invalid_timezone(client) -> None:
+    payload = _payload()
+    payload["timezone"] = "Mars/Olympus"
+    created = await client.post("/identity/users", json=payload)
+
+    assert created.status_code == 422
+    assert "Unknown IANA timezone" in created.text
+
+
+@pytest.mark.asyncio
 async def test_duplicate_email_409(client) -> None:
     p = _payload("dupe@example.com")
     assert (await client.post("/identity/users", json=p)).status_code == 201
@@ -104,6 +142,19 @@ async def test_patch_user_updates(client) -> None:
     body = patched.json()
     assert body["full_name"] == "Grace Hopper"
     assert body["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_patch_user_normalizes_legacy_timezone(client) -> None:
+    created = await client.post("/identity/users", json=_payload())
+    uid = created.json()["id"]
+    padded_alias = f"{' ' * 64}Asia/Calcutta{' ' * 64}"
+    patched = await client.patch(
+        f"/identity/users/{uid}", json={"timezone": padded_alias}
+    )
+
+    assert patched.status_code == 200
+    assert patched.json()["timezone"] == "Asia/Kolkata"
 
 
 @pytest.mark.asyncio

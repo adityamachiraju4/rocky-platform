@@ -5,6 +5,7 @@ import { registrationErrorMessage } from "../authMessages";
 import { apiErrorCode } from "../apiErrors";
 import AuthLayout from "../components/AuthLayout";
 import PasswordField from "../components/PasswordField";
+import { browserTimezone } from "../format";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -27,7 +28,7 @@ export default function RegisterPage() {
     if (busy || !fullName.trim() || !EMAIL_PATTERN.test(email.trim()) || password.length < 8 || password !== confirmation) return;
     setBusy(true); setError(null);
     try {
-      await register({ full_name: fullName.trim(), email: email.trim(), password, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" });
+      await register({ full_name: fullName.trim(), email: email.trim(), password, timezone: browserTimezone() || "UTC" });
       navigate("/verify-email", { replace: true, state: { email: email.trim(), sent: true } });
     } catch (caught) {
       if (apiErrorCode(caught) === "VERIFICATION_DELIVERY_FAILED") {
