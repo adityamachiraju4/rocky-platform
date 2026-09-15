@@ -114,7 +114,7 @@ def _build_database_url() -> URL:
 
 def get_database_url() -> str:
     """Return the configured database URL for external consumers (e.g. Alembic)."""
-    return str(_build_database_url())
+    return _build_database_url().render_as_string(hide_password=False)
 
 
 def get_engine() -> AsyncEngine:
