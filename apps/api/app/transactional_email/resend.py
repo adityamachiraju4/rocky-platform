@@ -16,17 +16,20 @@ class ResendTransactionalEmailProvider:
         self._timeout_seconds = timeout_seconds
 
     async def send(self, message: TransactionalEmail) -> None:
+        payload = {
+            "from": self._sender,
+            "to": [message.recipient],
+            "subject": message.subject,
+            "html": message.html,
+        }
+        if message.reply_to is not None:
+            payload["reply_to"] = message.reply_to
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.post(
                     "https://api.resend.com/emails",
                     headers={"Authorization": f"Bearer {self._api_key}"},
-                    json={
-                        "from": self._sender,
-                        "to": [message.recipient],
-                        "subject": message.subject,
-                        "html": message.html,
-                    },
+                    json=payload,
                 )
                 response.raise_for_status()
         except (httpx.HTTPError, ValueError) as exc:

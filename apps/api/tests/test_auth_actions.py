@@ -80,6 +80,7 @@ async def test_registration_creates_unverified_user_and_sends_verification(ctx, 
     assert len(fake_transactional_email.messages) == 1
     message = fake_transactional_email.messages[0]
     assert message.recipient == "ada@example.com"
+    assert message.reply_to == "support@rockyos.in"
     assert "Verify" in message.subject
     assert token_from_message(message)
     assert "http://localhost:5173/verify-email?" in message.html

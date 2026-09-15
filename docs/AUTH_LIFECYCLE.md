@@ -11,7 +11,7 @@ outward response, whether or not an eligible account exists.
   production this is mandatory and must not point at the marketing site unless
   that site actually hosts the authenticated application.
 - `EMAIL_FROM`: a sender identity already verified with the configured email
-  provider, for example `Rocky OS <no-reply@example.com>`.
+  provider. Production uses `Rocky OS <noreply@rockyos.in>`.
 - `RESEND_API_KEY`: Resend API credential.
 - `AUTH_ACTION_TOKEN_PEPPER`: an independent high-entropy server secret used
   for HMAC-SHA256 token hashing.
@@ -20,8 +20,9 @@ outward response, whether or not an eligible account exists.
 - `EMAIL_VERIFICATION_COOLDOWN_SECONDS`: resend cooldown; defaults to 60.
 
 Provider credentials and sender verification must be completed before enabling
-public registration. Tests replace the provider through FastAPI dependency
-injection and never call Resend.
+public registration. Verification and password-reset messages use
+`support@rockyos.in` as their Reply-To address. Tests replace the provider
+through FastAPI dependency injection and never call Resend.
 
 ## Email links and native clients
 

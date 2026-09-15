@@ -1,6 +1,6 @@
 import "./styles.css";
 import { useLayoutEffect, type ReactNode } from "react";
-import { COMPANY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, routeForPath, routes } from "./content";
+import { COMPANY_NAME, CONTACT_EMAILS, PRODUCT_NAME, PRODUCT_TAGLINE, routeForPath, routes } from "./content";
 
 function App() {
   const route = routeForPath(window.location.pathname);
@@ -165,12 +165,12 @@ function Feature({ index, name, body, children }: { index: string; name: string;
 function RoutePage({ notFound }: { notFound: boolean }) {
   const route = routeForPath(window.location.pathname);
   return <><section className={`page-hero ${notFound ? "not-found" : ""}`} data-reveal><p className="eyebrow">{route.eyebrow}</p><h1>{route.heading}</h1><p className="lead">{route.lead}</p>{notFound && <a className="button primary" href="/">Return home <span aria-hidden="true">→</span></a>}</section>
-    <section className="route-content">{route.sections.map((section, index) => <article className="content-block" data-reveal key={section.title}><span className="content-index">0{index + 1}</span><div><h2>{section.title}</h2><p>{section.body}</p>{section.items && <ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}</div></article>)}</section></>;
+    <section className="route-content">{route.sections.map((section, index) => <article className="content-block" data-reveal key={section.title}><span className="content-index">0{index + 1}</span><div><h2>{section.title}</h2><p>{section.body}</p>{section.items && <ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul>}{section.contacts?.map((contact) => <p className="contact-link" key={contact.email}>{contact.label}: <a href={`mailto:${contact.email}`}>{contact.email}</a></p>)}</div></article>)}</section></>;
 }
 
 function Footer() {
   return <footer className="footer"><div className="footer-brand"><a className="brand" href="/" aria-label="Rocky OS home"><BrandMark /><strong>{PRODUCT_NAME}</strong></a><p>{PRODUCT_TAGLINE}</p><small>{COMPANY_NAME}</small></div>
-    <div className="footer-links"><nav aria-label="Product navigation"><span>Explore</span><a href="/product">Product</a><a href="/voice">Voice</a><a href="/security">Security</a></nav><nav aria-label="Company and legal navigation"><span>Company</span><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><nav aria-label="Support navigation"><span>Support</span><a href="/support">Support</a><a href="/account-deletion">Account deletion</a><a href="/download">Early access</a></nav></div><p className="footer-note">© {new Date().getFullYear()} Rocky OS</p>
+    <div className="footer-links"><nav aria-label="Product navigation"><span>Explore</span><a href="/product">Product</a><a href="/voice">Voice</a><a href="/security">Security</a></nav><nav aria-label="Company and legal navigation"><span>Company</span><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><nav aria-label="Support navigation"><span>Support</span><a href="/support">Support</a><a href={`mailto:${CONTACT_EMAILS.support}`}>{CONTACT_EMAILS.support}</a><a href="/account-deletion">Account deletion</a><a href="/download">Early access</a></nav></div><p className="footer-note">© {new Date().getFullYear()} Rocky OS</p>
   </footer>;
 }
 

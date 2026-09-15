@@ -2,6 +2,14 @@ export const SITE_ORIGIN = "https://rockyos.in";
 export const COMPANY_NAME = "PhredSec Technologies Private Limited";
 export const PRODUCT_NAME = "Rocky OS";
 export const PRODUCT_TAGLINE = "Personal Intelligence OS";
+export const CONTACT_EMAILS = {
+  support: "support@rockyos.in",
+  hello: "hello@rockyos.in",
+  security: "security@rockyos.in",
+  privacy: "privacy@rockyos.in",
+  billing: "billing@rockyos.in",
+  contact: "contact@rockyos.in",
+} as const;
 
 export type RouteKey =
   | "home"
@@ -28,6 +36,7 @@ export interface SiteRoute {
     title: string;
     body: string;
     items?: string[];
+    contacts?: Array<{ label: string; email: string }>;
   }>;
 }
 
@@ -142,6 +151,7 @@ export const routes: SiteRoute[] = [
         title: "User choices",
         body:
           "Users should be able to control what they enter, request deletion of account data and avoid optional permissions unless a feature requires them.",
+        contacts: [{ label: "Privacy and data requests", email: CONTACT_EMAILS.privacy }],
       },
     ],
   },
@@ -169,7 +179,8 @@ export const routes: SiteRoute[] = [
       {
         title: "Responsible disclosure",
         body:
-          "Security contact details will be published before general availability. Please do not send sensitive vulnerability details through public channels until that contact path is available.",
+          "Report suspected vulnerabilities or security incidents directly to the Rocky security team.",
+        contacts: [{ label: "Security reports", email: CONTACT_EMAILS.security }],
       },
     ],
   },
@@ -197,7 +208,8 @@ export const routes: SiteRoute[] = [
       {
         title: "Company",
         body:
-          "Rocky OS is a product of PhredSec Technologies Private Limited. Additional company and contact details will be published before general availability.",
+          "Rocky OS is a product of PhredSec Technologies Private Limited.",
+        contacts: [{ label: "General enquiries", email: CONTACT_EMAILS.hello }],
       },
     ],
   },
@@ -221,6 +233,7 @@ export const routes: SiteRoute[] = [
         title: "Early access",
         body:
           "Early access details will be published on this page before general availability, including supported platforms and testing instructions.",
+        contacts: [{ label: "Early-access enquiries", email: CONTACT_EMAILS.hello }],
       },
       {
         title: "What to expect",
@@ -236,19 +249,21 @@ export const routes: SiteRoute[] = [
     description:
       "Support information for Rocky OS users, early testers and account questions.",
     eyebrow: "Support",
-    heading: "Support will open with early access.",
+    heading: "Help when you need it.",
     lead:
-      "Support contact details will be published before general availability. This page will become the central support entry point.",
+      "This is the central support entry point for Rocky accounts, product questions and troubleshooting.",
     sections: [
       {
         title: "Account help",
         body:
-          "For now, account support procedures are being prepared alongside the public release. Do not share passwords or private tokens with anyone claiming to provide support.",
+          "Contact Rocky support for account access, verification and recovery help. Never share passwords or private tokens with anyone claiming to provide support.",
+        contacts: [{ label: "Customer support", email: CONTACT_EMAILS.support }],
       },
       {
         title: "Product feedback",
         body:
-          "Early testers will receive the appropriate feedback path with their test invitation or release notes.",
+          "Questions and feedback from early testers are welcome through the support address.",
+        contacts: [{ label: "Product help and feedback", email: CONTACT_EMAILS.support }],
       },
       {
         title: "Service status",
@@ -283,6 +298,11 @@ export const routes: SiteRoute[] = [
         body:
           "Rocky may produce incomplete or incorrect information. Users should verify important outputs before relying on them for legal, medical, financial or safety-critical decisions.",
       },
+      {
+        title: "Questions",
+        body: "Contact Rocky support with questions about these terms or use of the service.",
+        contacts: [{ label: "Terms support", email: CONTACT_EMAILS.support }],
+      },
     ],
   },
   {
@@ -294,12 +314,16 @@ export const routes: SiteRoute[] = [
     eyebrow: "Account deletion",
     heading: "Account deletion should be clear and human.",
     lead:
-      "A self-service account deletion flow and confirmed contact path will be published before general availability.",
+      "Until self-service deletion is available, you can request deletion directly from the Rocky privacy team.",
     sections: [
       {
         title: "Before public launch",
         body:
-          "If you are an early tester, use the account deletion instructions provided with your testing invitation or release notes.",
+          "Early testers can request account deletion by email. Support can help if you cannot access your account.",
+        contacts: [
+          { label: "Account deletion and data requests", email: CONTACT_EMAILS.privacy },
+          { label: "Account support", email: CONTACT_EMAILS.support },
+        ],
       },
       {
         title: "What deletion should cover",

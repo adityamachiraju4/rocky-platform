@@ -5,6 +5,12 @@ const siteOrigin = "https://rockyos.in";
 const siteName = "Rocky OS";
 const companyName = "PhredSec Technologies Private Limited";
 const ogImage = `${siteOrigin}/og-image.png`;
+const contactEmails = {
+  support: "support@rockyos.in",
+  hello: "hello@rockyos.in",
+  security: "security@rockyos.in",
+  privacy: "privacy@rockyos.in",
+};
 
 const routes = [
   {
@@ -63,7 +69,7 @@ const routes = [
     sections: [
       ["Information Rocky may process", "Rocky may process account details, conversations, voice recordings submitted for transcription and user-created workspace data."],
       ["How information is used", "Information is used to provide the Rocky experience, maintain sessions, respond to requests, diagnose failures and protect the service."],
-      ["User choices", "Users should be able to control what they enter, request deletion of account data and avoid optional permissions unless needed."],
+      ["User choices", "Users should be able to control what they enter, request deletion of account data and avoid optional permissions unless needed.", [["Privacy and data requests", contactEmails.privacy]]],
     ],
   },
   {
@@ -76,7 +82,7 @@ const routes = [
     sections: [
       ["Account and transport protection", "Rocky uses token-based authentication and HTTPS for production network requests."],
       ["Native permissions", "Microphone and location permissions are requested only when needed for the corresponding user action."],
-      ["Responsible disclosure", "Security contact details will be published before general availability."],
+      ["Responsible disclosure", "Report suspected vulnerabilities or security incidents directly to the Rocky security team.", [["Security reports", contactEmails.security]]],
     ],
   },
   {
@@ -89,7 +95,7 @@ const routes = [
     sections: [
       ["Why Rocky exists", "People spread their lives across chats, notes, reminders, lists and tools. Rocky exists to carry context forward."],
       ["Product philosophy", "Useful memory, visible controls, fast capture and a calm interface for repeated daily use."],
-      ["Company", "Rocky OS is a product of PhredSec Technologies Private Limited."],
+      ["Company", "Rocky OS is a product of PhredSec Technologies Private Limited.", [["General enquiries", contactEmails.hello]]],
     ],
   },
   {
@@ -101,7 +107,7 @@ const routes = [
     lead: "The public app download is not open yet. Early access and store links will be published here when ready.",
     sections: [
       ["Current availability", "Rocky is being prepared for physical-device testing and public launch readiness."],
-      ["Early access", "Early access details will be published on this page before general availability."],
+      ["Early access", "Early access details will be published on this page before general availability.", [["Early-access enquiries", contactEmails.hello]]],
       ["What to expect", "The first public experience will focus on conversations, voice, projects, tasks, reminders, notes, lists and activity continuity."],
     ],
   },
@@ -110,11 +116,11 @@ const routes = [
     title: "Support | Rocky OS",
     description: "Support information for Rocky OS users, early testers and account questions.",
     eyebrow: "Support",
-    heading: "Support will open with early access.",
-    lead: "Support contact details will be published before general availability. This page will become the central support entry point.",
+    heading: "Help when you need it.",
+    lead: "This is the central support entry point for Rocky accounts, product questions and troubleshooting.",
     sections: [
-      ["Account help", "Account support procedures are being prepared alongside the public release."],
-      ["Product feedback", "Early testers will receive the appropriate feedback path with their test invitation or release notes."],
+      ["Account help", "Contact Rocky support for account access, verification and recovery help. Never share passwords or private tokens with anyone claiming to provide support.", [["Customer support", contactEmails.support]]],
+      ["Product feedback", "Questions and feedback from early testers are welcome through the support address.", [["Product help and feedback", contactEmails.support]]],
       ["Service status", "If Rocky is unavailable during testing, check release notes and retry after the backend or app build has been updated."],
     ],
   },
@@ -129,6 +135,7 @@ const routes = [
       ["Use of the service", "Rocky OS helps users manage personal context, conversations and productivity workflows."],
       ["Availability and changes", "Features may change during early access and the service may be interrupted for maintenance."],
       ["Limitations", "Users should verify important outputs before relying on them for critical decisions."],
+      ["Questions", "Contact Rocky support with questions about these terms or use of the service.", [["Terms support", contactEmails.support]]],
     ],
   },
   {
@@ -137,9 +144,9 @@ const routes = [
     description: "Learn how Rocky OS account deletion requests will be handled before general availability.",
     eyebrow: "Account deletion",
     heading: "Account deletion should be clear and human.",
-    lead: "A self-service account deletion flow and confirmed contact path will be published before general availability.",
+    lead: "Until self-service deletion is available, you can request deletion directly from the Rocky privacy team.",
     sections: [
-      ["Before public launch", "Early testers should use the account deletion instructions provided with their testing invitation or release notes."],
+      ["Before public launch", "Early testers can request account deletion by email. Support can help if you cannot access your account.", [["Account deletion and data requests", contactEmails.privacy], ["Account support", contactEmails.support]]],
       ["What deletion should cover", "Account deletion is expected to cover account identity and user-created Rocky data where retention is not legally required."],
       ["Future self-service flow", "This page will be updated with exact steps once public account management is available."],
     ],
@@ -208,11 +215,11 @@ function prerenderBody(route) {
     .map((item) => `<a href="${item.path}">${item.eyebrow}</a>`)
     .join("");
   const content = route.sections
-    .map(([title, body]) => `<article class="content-block"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p></article>`)
+    .map(([title, body, contacts = []]) => `<article class="content-block"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p>${contacts.map(([label, email]) => `<p class="contact-link">${escapeHtml(label)}: <a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></p>`).join("")}</article>`)
     .join("");
 
   const brand = `<span class="brand-symbol" aria-hidden="true"><span></span></span><strong>Rocky OS</strong>`;
-  const footer = `<footer class="footer"><div class="footer-brand"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><p>Personal Intelligence OS</p><small>${companyName}</small></div><div class="footer-links"><nav aria-label="Product navigation"><span>Explore</span><a href="/product">Product</a><a href="/voice">Voice</a><a href="/security">Security</a></nav><nav aria-label="Company and legal navigation"><span>Company</span><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><nav aria-label="Support navigation"><span>Support</span><a href="/support">Support</a><a href="/account-deletion">Account deletion</a><a href="/download">Early access</a></nav></div><p class="footer-note">© ${new Date().getFullYear()} Rocky OS</p></footer>`;
+  const footer = `<footer class="footer"><div class="footer-brand"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><p>Personal Intelligence OS</p><small>${companyName}</small></div><div class="footer-links"><nav aria-label="Product navigation"><span>Explore</span><a href="/product">Product</a><a href="/voice">Voice</a><a href="/security">Security</a></nav><nav aria-label="Company and legal navigation"><span>Company</span><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav><nav aria-label="Support navigation"><span>Support</span><a href="/support">Support</a><a href="mailto:${contactEmails.support}">${contactEmails.support}</a><a href="/account-deletion">Account deletion</a><a href="/download">Early access</a></nav></div><p class="footer-note">© ${new Date().getFullYear()} Rocky OS</p></footer>`;
 
   if (route.path === "/") {
     return `<div class="site-shell"><a class="skip-link" href="#main">Skip to content</a><header class="site-header"><div class="header-inner"><a class="brand" href="/" aria-label="Rocky OS home">${brand}</a><nav class="nav" aria-label="Primary navigation">${routeLinks}</nav><a class="nav-cta" href="/download"><span class="desktop-label">Get early access</span><span class="mobile-label">Early access</span><span aria-hidden="true">↗</span></a></div></header><main id="main">

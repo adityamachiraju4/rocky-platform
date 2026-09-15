@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import BrandMark from "./BrandMark";
+import { CONTACT_EMAILS } from "../contact";
 
 export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
@@ -15,7 +16,10 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
         <div className="auth-presence" aria-hidden="true"><i /><i /><i /></div>
         <p className="auth-footnote">Your workspace, ready when you are.</p>
       </aside>
-      <main className="auth-main" id="auth-main">{children}</main>
+      <main className="auth-main" id="auth-main"><div className="auth-main-inner">
+        {children}
+        <p className="auth-support">Need help? <a href={`mailto:${CONTACT_EMAILS.support}`}>{CONTACT_EMAILS.support}</a></p>
+      </div></main>
     </div>
   );
 }

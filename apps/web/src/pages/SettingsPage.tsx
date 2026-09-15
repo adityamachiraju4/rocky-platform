@@ -1,4 +1,5 @@
 import AppShell from "../AppShell";
+import { CONTACT_EMAILS } from "../contact";
 
 export default function SettingsPage() {
   return (
@@ -16,6 +17,7 @@ export default function SettingsPage() {
             <span className="mc-empty-mark" aria-hidden="true">⚙</span>
             <strong>Settings are not configurable yet</strong>
             <span>This page is reserved for real account and workspace controls when the backend exposes them.</span>
+            <span>Need account help? <a href={`mailto:${CONTACT_EMAILS.support}`}>{CONTACT_EMAILS.support}</a></span>
           </div>
         </section>
       </div>

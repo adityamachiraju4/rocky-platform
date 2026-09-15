@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.action_repository import AuthActionTokenRepository
+from app.core.contact import SUPPORT_EMAIL
 from app.core.security import hash_password
 from app.core.settings import (
     get_auth_action_token_pepper,
@@ -110,6 +111,7 @@ class AuthActionService:
                 f"<h1>{heading}</h1><p>Hi {name},</p><p>{copy}</p>"
                 f'<p><a href="{safe_url}">Continue to Rocky OS</a></p>'
             ),
+            reply_to=SUPPORT_EMAIL,
         )
         try:
             await self._email.send(message)
