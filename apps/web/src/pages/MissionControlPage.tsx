@@ -1,11 +1,12 @@
 import { Link } from "react-router-dom";
 import { Capacitor } from "@capacitor/core";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import AppShell from "../AppShell";
 import { ApiError, AuthExpiredError, sendConversation, synthesizeSpeech, transcribeAudio } from "../api";
 import { useResource } from "../useApi";
-import { loadMissionControl, type MissionControlData, type EntityRef } from "../missionControl";
-import { humanizeEvent } from "../activityLabels";
+import { loadMissionControl, type MissionControlData } from "../missionControl";
+import RockyPresence from "../components/RockyPresence";
+import CommandCenterPanels from "../components/CommandCenterPanels";
 import type { ConversationResponse, DeviceLocationContext, Reminder } from "../types";
 import { startBrowserSpeech, type BrowserSpeechStartResult } from "../browserSpeech";
 import { needsDeviceLocation, requestDeviceLocationContext } from "../locationContext";
@@ -114,14 +115,6 @@ const RECORDING_MIME_TYPES = [
   "audio/ogg",
 ];
 const SPOKEN_OUTPUT_KEY = "rocky.spoken-output";
-
-// Resolve an activity event to the in-app route for its entity, when we can.
-// task.* -> the owning project's detail page; project.* -> that project.
-// Returns null when there is no sensible target (unknown entity type).
-function entityLink(ref: EntityRef | undefined): string | null {
-  if (!ref) return null;
-  return `/projects/${ref.projectId}`;
-}
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -362,7 +355,9 @@ function RockyInteraction({
     ? "Voice input requires a secure connection. Typing is still available."
     : "Voice input is unavailable in this browser. Typing is still available.";
   const currentState = stateCopy(interactionState);
-  const visualState = voiceError || error ? "error" : interactionState;
+  const visualState = interactionState !== "idle"
+    ? interactionState
+    : voiceError || error ? "error" : "idle";
   const hasDraft = draft.trim().length > 0;
 
   const resizeComposer = useCallback(() => {
@@ -1734,13 +1729,18 @@ function RockyInteraction({
 
   return (
     <section className="rocky-hero" aria-label="Rocky interaction">
-      <div className={`rocky-presence-orbit ${visualState}`} aria-hidden="true"><i /><i /><i /></div>
       <div className="rocky-prompt">
-        <p className="mission-eyebrow">Mission Control</p>
+        <p className="mission-eyebrow">{new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</p>
         <h1 className="rocky-title">{name ? `${greeting()}, ${name}` : greeting()}</h1>
         <p className="rocky-question">{summary}</p>
       </div>
 
+      <RockyPresence state={visualState === "idle" && response ? "success" : visualState} analyserRef={voiceAnalyserRef} />
+      <div className="cc-presence-status" id="rocky-status-detail" role="status">
+        <span className={`cc-status-light ${visualState}`} />
+        {visualState === "error" ? "Let’s try that again" : interactionState === "speaking" ? "Rocky is speaking" : currentState.detail}
+        {interactionState === "speaking" && <button type="button" onClick={() => stopRockySpeech({ releasePlaybackContext: true })}>Stop <span aria-hidden="true">■</span></button>}
+      </div>
       <form className="rocky-form" onSubmit={onSubmit}>
         <div className="rocky-input-shell">
           <textarea
@@ -1754,7 +1754,7 @@ function RockyInteraction({
               window.requestAnimationFrame(resizeComposer);
             }}
             onKeyDown={onComposerKeyDown}
-            placeholder="Ask Rocky anything, or tell it what to do"
+            placeholder="Ask Rocky anything…"
             aria-label="Ask Rocky anything, or tell it what to do"
             aria-describedby="rocky-status-detail"
           />
@@ -1805,26 +1805,18 @@ function RockyInteraction({
         </div>
       </form>
 
-      <div className="rocky-state" aria-live="polite">
-        <span className={`rocky-state-dot ${visualState}`} aria-hidden="true" />
-        <strong>{visualState === "error" ? "Needs attention" : currentState.label}</strong>
-        <span id="rocky-status-detail">{currentState.detail}</span>
-        <span className={`rocky-signal ${visualState}`} aria-hidden="true"><i /><i /><i /><i /><i /></span>
-        {interactionState === "speaking" && (
-          <button
-            className="rocky-stop"
-            type="button"
-            onClick={() => stopRockySpeech({ releasePlaybackContext: true })}
-          >
-            Stop speaking
-          </button>
-        )}
+      {(!voiceSupported || !online || voiceError || error) && <div className="rocky-state" aria-live="polite">
         {!voiceSupported && <span>{voiceUnavailableMessage}</span>}
         {!online && <span className="err">Offline. Backend-dependent requests are paused.</span>}
         {voiceError && <span className="err">{voiceError}</span>}
         {error && <span className="err">{error}</span>}
-      </div>
+      </div>}
 
+      <div className="cc-command-tools">
+      <nav className="cc-quick-actions" aria-label="Command shortcuts">
+        <Link to="/projects"><span aria-hidden="true">□</span> Projects</Link>
+        {["Remind me to ", "What's next?"].map((text) => <button key={text} type="button" disabled={submitting || listening || micStarting} onClick={() => { setDraft(text); inputRef.current?.focus(); window.requestAnimationFrame(resizeComposer); }}><span aria-hidden="true">{text.startsWith("Remind") ? "◷" : "↗"}</span>{text.startsWith("Remind") ? "Remind me" : text}</button>)}
+      </nav>
       <div className="rocky-options">
         <label
           className="rocky-audio-toggle"
@@ -1854,6 +1846,12 @@ function RockyInteraction({
         </label>
       </div>
 
+      <aside className="cc-live" aria-label="Live intelligence">
+        <div><span className="cc-overline">Live intelligence</span><p>Bring the world into context.</p></div>
+        <div className="cc-live-actions">{["What's the weather today?", "What's the latest news?"].map((text) => <button type="button" key={text} disabled={submitting || listening || micStarting} onClick={() => { setDraft(text); inputRef.current?.focus(); window.requestAnimationFrame(resizeComposer); }}>{text.includes("weather") ? "Local weather ↗" : "Latest news ↗"}</button>)}</div>
+        <small>Ask to check. Location is requested only when needed.</small>
+      </aside>
+      </div>
       {response && (
         <div className="rocky-latest" ref={latestResponseRef} aria-live="polite">
           <p className="rocky-latest-label">Rocky</p>
@@ -1900,33 +1898,6 @@ function dueReminders(data: MissionControlData): Reminder[] {
   );
 }
 
-function relativeTime(value: string): string {
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return "Recently";
-  const difference = timestamp - Date.now();
-  const absolute = Math.abs(difference);
-  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-  if (absolute < 60_000) return "Just now";
-  if (absolute < 3_600_000) return formatter.format(Math.round(difference / 60_000), "minute");
-  if (absolute < 86_400_000) return formatter.format(Math.round(difference / 3_600_000), "hour");
-  if (absolute < 604_800_000) return formatter.format(Math.round(difference / 86_400_000), "day");
-  return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function dueLabel(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Due soon";
-  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  if (isToday(value)) return `Today, ${time}`;
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 function displayName(data: MissionControlData | null): string | null {
   const fullName = data?.profile?.full_name?.trim();
   if (!fullName) return null;
@@ -1951,235 +1922,13 @@ function overviewCopy(data: MissionControlData | null): string {
   return parts.length > 0 ? `You have ${parts.join(", ")}.` : "Ask Rocky what needs your attention.";
 }
 
-function SectionHeading({ title, action }: { title: string; action?: ReactNode }) {
-  return (
-    <div className="mc-panel-head">
-      <h2>{title}</h2>
-      {action}
-    </div>
-  );
-}
-
-function SummaryCards({ data }: { data: MissionControlData }) {
-  const activeProjects = data.projects.filter(({ project }) => project.status === "active").length;
-  const unread = data.notifications.filter((notification) => notification.status === "unread").length;
-  const cards = [
-    { label: "Active Projects", icon: "□", value: activeProjects, detail: "Projects in motion", href: "/projects", error: data.errors.work },
-    { label: "Open Tasks", icon: "✓", value: data.activeTasks.length, detail: "Across projects", error: data.errors.work },
-    { label: "Due Reminders", icon: "◷", value: dueReminders(data).length, detail: "Due today", error: data.errors.reminders },
-    { label: "Unread Notifications", icon: "○", value: unread, detail: "Needs review", href: "/notifications", error: data.errors.notifications },
-  ];
-
-  return (
-    <section className="mc-summary" aria-label="Today at a glance">
-      {cards.map((card) => {
-        const content = (
-          <>
-            <span className="mc-summary-icon" aria-hidden="true">{card.icon}</span>
-            <span className="mc-summary-label">{card.label}</span>
-            <strong>{card.error ? "--" : card.value}</strong>
-            <span className={card.error ? "mc-summary-detail err" : "mc-summary-detail"}>
-              {card.error ? "Unavailable" : card.detail}
-            </span>
-          </>
-        );
-        return card.href ? (
-          <Link className="mc-summary-card" to={card.href} key={card.label}>{content}</Link>
-        ) : (
-          <div className="mc-summary-card" key={card.label}>{content}</div>
-        );
-      })}
-    </section>
-  );
-}
-
-function ResumePanel({ data }: { data: MissionControlData }) {
-  const recent = data.recentActivity.find((activity) => {
-    const ref = data.entityById.get(activity.entity_id);
-    return ref && data.activeTasks.some((item) => item.projectId === ref.projectId);
-  });
-  const recentRef = recent ? data.entityById.get(recent.entity_id) : undefined;
-  const candidate = data.activeTasks.find((item) => item.projectId === recentRef?.projectId)
-    ?? data.activeTasks[0];
-
-  return (
-    <section className="mc-panel mc-resume" aria-label="Resume">
-      <SectionHeading title="Continue" />
-      <p className="mc-panel-subtitle">Pick up where you left off</p>
-      {data.errors.work ? (
-        <p className="mc-panel-error">Projects and tasks are temporarily unavailable.</p>
-      ) : candidate ? (
-        <Link className="mc-resume-link" to={`/projects/${candidate.projectId}`}>
-          <span className="mc-kicker">{candidate.projectName}</span>
-          <strong>{candidate.task.title}</strong>
-          <span>{recent ? `${humanizeEvent(recent.event_type)} ${relativeTime(recent.created_at)}` : "Next open task"}</span>
-          <span className="mc-text-action">Open project <span aria-hidden="true">→</span></span>
-        </Link>
-      ) : (
-        <div className="mc-empty-state">
-          <span className="mc-empty-mark" aria-hidden="true">□</span>
-          <strong>Nothing waiting to resume</strong>
-          <span>Your active work will appear here.</span>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function FocusPanel({ data }: { data: MissionControlData }) {
-  const reminders = dueReminders(data).slice(0, 2);
-  const taskLimit = Math.max(0, 4 - reminders.length);
-  const tasks = data.activeTasks.slice(0, taskLimit);
-  const empty = reminders.length === 0 && tasks.length === 0;
-
-  return (
-    <section className="mc-panel mc-focus" aria-label="Today">
-      <SectionHeading title="Today" />
-      {(data.errors.work || data.errors.reminders) && empty ? (
-        <p className="mc-panel-error">Focus items are temporarily unavailable.</p>
-      ) : empty ? (
-        <div className="mc-empty-state">
-          <span className="mc-empty-mark" aria-hidden="true">✓</span>
-          <strong>Your day is clear</strong>
-          <span>No active tasks or reminders are due today.</span>
-        </div>
-      ) : (
-        <ul className="mc-compact-list">
-          {reminders.map((reminder) => (
-            <li key={reminder.id}>
-              <span className="mc-row-mark reminder" aria-hidden="true">◷</span>
-              <span className="mc-row-copy"><strong>{reminder.title}</strong><span>{dueLabel(reminder.due_at)}</span></span>
-            </li>
-          ))}
-          {tasks.map((item) => (
-            <li key={item.task.id}>
-              <span className="mc-row-mark" aria-hidden="true">✓</span>
-              <Link className="mc-row-copy" to={`/projects/${item.projectId}`}>
-                <strong>{item.task.title}</strong><span>{item.projectName}</span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function NotificationsPanel({ data }: { data: MissionControlData }) {
-  const notifications = data.notifications
-    .filter((notification) => notification.status !== "dismissed")
-    .sort((a, b) => Number(b.status === "unread") - Number(a.status === "unread")
-      || new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 4);
-
-  return (
-    <section className="mc-panel mc-notifications" aria-label="Notifications">
-      <SectionHeading title="Notifications" />
-      {data.errors.notifications ? (
-        <p className="mc-panel-error">Notifications are temporarily unavailable.</p>
-      ) : notifications.length === 0 ? (
-        <div className="mc-empty-state"><span className="mc-empty-mark" aria-hidden="true">○</span><strong>You're caught up</strong><span>No unread notifications.</span></div>
-      ) : (
-        <ul className="mc-intel-list">
-          {notifications.map((notification) => {
-            const ref = notification.source_id ? data.entityById.get(notification.source_id) : undefined;
-            const href = entityLink(ref);
-            const content = <><strong>{notification.title}</strong><span>{notification.body}</span><time>{relativeTime(notification.created_at)}</time></>;
-            return (
-              <li className={notification.status === "unread" ? "unread" : ""} key={notification.id}>
-                {href ? <Link to={href}>{content}</Link> : <div>{content}</div>}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function RemindersPanel({ data }: { data: MissionControlData }) {
-  const reminders = activeReminders(data).slice(0, 4);
-  return (
-    <section className="mc-panel mc-reminders" aria-label="Upcoming Reminders">
-      <SectionHeading title="Upcoming Reminders" />
-      {data.errors.reminders ? (
-        <p className="mc-panel-error">Reminders are temporarily unavailable.</p>
-      ) : reminders.length === 0 ? (
-        <div className="mc-empty-state"><span className="mc-empty-mark attention" aria-hidden="true">◷</span><strong>Nothing scheduled</strong><span>Upcoming reminders will appear here.</span></div>
-      ) : (
-        <ul className="mc-intel-list">
-          {reminders.map((reminder) => (
-            <li key={reminder.id} className={reminder.status === "due" ? "unread" : ""}>
-              <div><strong>{reminder.title}</strong><span>{reminder.notes || "Personal reminder"}</span><time>{dueLabel(reminder.due_at)}</time></div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function MissionDashboard({ data }: { data: MissionControlData }) {
-  return (
-    <div className="mc-dashboard">
-      <FocusPanel data={data} />
-      <ResumePanel data={data} />
-      <SummaryCards data={data} />
-      <RemindersPanel data={data} />
-      <NotificationsPanel data={data} />
-    </div>
-  );
-}
-
-function RecentActivity({ data }: { data: MissionControlData }) {
-  const changes = data.recentActivity.slice(0, 7);
-
-  return (
-    <section className="ambient-section recent-section" aria-labelledby="recent-title">
-      <div className="ambient-section-head row">
-        <h2 id="recent-title">Recent</h2>
-        <Link to="/activity" className="ambient-link">View all</Link>
-      </div>
-      {data.errors.activity ? (
-        <p className="mc-panel-error">Recent activity is temporarily unavailable.</p>
-      ) : changes.length === 0 ? (
-        <p className="muted recent-empty">No activity yet.</p>
-      ) : (
-        <ul className="recent-list">
-          {changes.map((a) => {
-            const ref = data.entityById.get(a.entity_id);
-            const href = entityLink(ref);
-            const row = (
-              <>
-                <span className="recent-dot" aria-hidden="true" />
-                <span className="recent-time">{relativeTime(a.created_at)}</span>
-                <span className="recent-label">{humanizeEvent(a.event_type)}</span>
-                <span className="recent-entity">{ref?.name ?? humanizeEvent(a.event_type)}</span>
-                <span className="recent-arrow" aria-hidden="true">›</span>
-              </>
-            );
-            return (
-              <li key={a.id} className="recent-row">
-                {href ? (
-                  <Link to={href} className="recent-row-link">{row}</Link>
-                ) : (
-                  <div className="recent-row-link recent-row-static">{row}</div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 export default function MissionControlPage() {
   const { data, loading, error, reload } = useResource<MissionControlData>(loadMissionControl);
 
   return (
     <AppShell>
-      <div className="rocky-home">
+      <div className="rocky-home command-center">
+        <header className="cc-topbar"><span>MISSION CONTROL <i /> Personal intelligence</span><Link to="/notifications" aria-label="Open notifications">Notifications <span aria-hidden="true">↗</span></Link></header>
         <RockyInteraction
           name={displayName(data)}
           summary={overviewCopy(data)}
@@ -2191,8 +1940,7 @@ export default function MissionControlPage() {
 
         {data && (
           <>
-            <MissionDashboard data={data} />
-            <RecentActivity data={data} />
+            <CommandCenterPanels data={data} />
           </>
         )}
       </div>
