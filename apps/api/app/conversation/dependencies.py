@@ -17,10 +17,7 @@ from app.core import settings
 from app.core.dependencies import get_session
 from app.live.dependencies import LiveIntelligenceServiceDep
 
-from app.conversation.context import (
-    ConversationContextStore,
-    conversation_context_store,
-)
+from app.conversation.context import ConversationContextStore
 from app.conversation.openai_provider import OpenAIUnderstandingProvider
 from app.conversation.service import ConversationService
 from app.conversation.understanding import (
@@ -49,10 +46,6 @@ def get_understanding_provider() -> UnderstandingProvider | None:
         return None
 
 
-def get_conversation_context_store() -> ConversationContextStore:
-    return conversation_context_store
-
-
 def get_conversation_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     provider: Annotated[
@@ -60,16 +53,12 @@ def get_conversation_service(
         Depends(get_understanding_provider),
     ],
     live_service: LiveIntelligenceServiceDep,
-    context_store: Annotated[
-        ConversationContextStore,
-        Depends(get_conversation_context_store),
-    ],
 ) -> ConversationService:
     return ConversationService(
         session,
         understanding_provider=provider,
         live_service=live_service,
-        context_store=context_store,
+        context_store=ConversationContextStore(session),
     )
 
 
@@ -80,6 +69,5 @@ ConversationServiceDep = Annotated[
 __all__ = [
     "get_conversation_service",
     "get_understanding_provider",
-    "get_conversation_context_store",
     "ConversationServiceDep",
 ]

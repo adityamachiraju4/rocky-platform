@@ -68,6 +68,16 @@ type SpeechWindow = Window & {
 };
 
 type InteractionState = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
+const CONVERSATION_THREAD_KEY_PREFIX = "rocky.conversation.thread_id";
+
+function storedConversationThreadId(userId: string | null): string | null {
+  if (!userId) return null;
+  try {
+    return window.localStorage.getItem(`${CONVERSATION_THREAD_KEY_PREFIX}.${userId}`);
+  } catch {
+    return null;
+  }
+}
 
 interface RecordingDiagnostics {
   analyserMinRms: number;
@@ -284,13 +294,19 @@ function RockyInteraction({
   onMutatingAction,
   name,
   summary,
+  userId,
 }: {
   onMutatingAction: () => void;
   name: string | null;
   summary: string;
+  userId: string | null;
 }) {
   const [draft, setDraft] = useState("");
   const [response, setResponse] = useState<ConversationResponse | null>(null);
+  const [threadContext, setThreadContext] = useState<{
+    userId: string | null;
+    threadId: string | null;
+  }>({ userId: null, threadId: null });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -313,6 +329,7 @@ function RockyInteraction({
     detectorFrameCount: 0,
     zeroSignalFrameCount: 0,
   });
+
   const voiceAudioContextRef = useRef<AudioContext | null>(null);
   const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -847,8 +864,12 @@ function RockyInteraction({
       startedAt: conversationTiming.startedAtIso,
     });
     try {
+      const requestThreadId = threadContext.userId === userId
+        ? threadContext.threadId
+        : storedConversationThreadId(userId);
       const result = await sendConversation({
         message: text,
+        thread_id: requestThreadId,
         timezone: browserTimezone(),
         language,
         location_context: locationContext,
@@ -861,6 +882,19 @@ function RockyInteraction({
         success: true,
       });
       setResponse(result);
+      if (result.thread_id !== requestThreadId || threadContext.userId !== userId) {
+        setThreadContext({ userId, threadId: result.thread_id });
+        if (userId) {
+          try {
+            window.localStorage.setItem(
+              `${CONVERSATION_THREAD_KEY_PREFIX}.${userId}`,
+              result.thread_id,
+            );
+          } catch {
+            /* conversation continuity persistence is best-effort */
+          }
+        }
+      }
       setInteractionState("idle");
       if (!usesCoarsePointer()) inputRef.current?.focus();
       const composerRect = inputRef.current?.getBoundingClientRect();
@@ -1925,6 +1959,7 @@ export default function MissionControlPage() {
         <RockyInteraction
           name={displayName(data)}
           summary={overviewCopy(data)}
+          userId={data?.profile?.id ?? null}
           onMutatingAction={reload}
         />
 

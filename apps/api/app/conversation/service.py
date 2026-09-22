@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -61,10 +62,10 @@ from app.live.intent import LiveIntent
 from app.conversation import registry
 from app.conversation.context import (
     ConversationContextStore,
-    GeneralConversationTurn,
-    GroundedProjectReference,
-    GroundedTaskReference,
+    DurableReference,
+    RecentTurn,
 )
+from app.models.conversation import ConversationThread
 from app.conversation.exceptions import (
     AmbiguousReferenceError,
     CompletionTargetNotFoundError,
@@ -236,7 +237,7 @@ class ConversationService:
         self._responder: Responder = responder or TemplateResponder()
         self._understanding_provider = understanding_provider
         self._live_service = live_service
-        self._context_store = context_store
+        self._context_store = context_store or ConversationContextStore(session)
 
     async def _build_world(self, current_user: User) -> WorldView:
         projects = await self._projects.list_projects(current_user)
@@ -314,7 +315,75 @@ class ConversationService:
             lists=tuple(list_refs),
         )
 
+    async def create_thread(
+        self, current_user: User, *, title: str | None = None
+    ) -> ConversationThread:
+        return await self._context_store.create_thread(
+            current_user.id, title=title
+        )
+
     async def handle(
+        self,
+        current_user: User,
+        message: str,
+        thread_id: uuid.UUID | None = None,
+        timezone_name: str | None = None,
+        language: str | None = None,
+        location_context: LocationContext | None = None,
+    ) -> ConversationResponse:
+        thread = await self._context_store.resolve_thread(
+            current_user.id, thread_id
+        )
+        self._current_thread_id = thread.id
+        self._current_references = await self._context_store.references(thread.id)
+        self._current_recent_turns = await self._context_store.recent_turns(thread.id)
+        turn_language = response_language(message, language)
+        await self._context_store.add_turn(
+            thread,
+            role="user",
+            content=message,
+            language=turn_language,
+        )
+        response = await self._handle_turn(
+            current_user,
+            message,
+            timezone_name=timezone_name,
+            language=language,
+            location_context=location_context,
+        )
+        response = response.model_copy(update={"thread_id": thread.id})
+        await self._context_store.add_turn(
+            thread,
+            role="assistant",
+            content=response.reply,
+            language=response.language,
+            metadata={
+                "executed": response.executed,
+                "action": response.action,
+            },
+        )
+        await self._context_store.set_reference(
+            thread.id,
+            kind="prior_result",
+            entity_id=None,
+            display_text=response.reply[:2000],
+            metadata={"message": message[:2000], "language": response.language},
+        )
+        if response.action and response.action.startswith(
+            ("weather.", "news.", "web.", "market.", "crypto.",
+             "sports.", "places.", "time.")
+        ):
+            kind = "place" if response.action == live_registry.PLACES_SEARCH else "live_subject"
+            await self._context_store.set_reference(
+                thread.id,
+                kind=kind,
+                entity_id=None,
+                display_text=message,
+                metadata={"tool": response.action},
+            )
+        return response
+
+    async def _handle_turn(
         self,
         current_user: User,
         message: str,
@@ -342,6 +411,7 @@ class ConversationService:
                     live_result = await self._live_service.execute(live_intent)
                     return ConversationResponse(
                         executed=False,
+                        thread_id=self._current_thread_id,
                         action=live_result.tool_name,
                         reply=render_live_result(live_result),
                         language=turn_language,
@@ -430,7 +500,7 @@ class ConversationService:
         outcome = await self._dispatch(
             current_user, action, world, timezone_name
         )
-        self._remember_outcome(current_user, outcome)
+        await self._remember_outcome(outcome)
         return self._respond(outcome, turn_language)
 
     async def _try_provider(
@@ -445,11 +515,6 @@ class ConversationService:
         if self._understanding_provider is None:
             return fallback
 
-        self._current_context_task = (
-            self._context_store.get_last_task(current_user.id)
-            if self._context_store is not None
-            else None
-        )
         try:
             provider_started = time.perf_counter()
             include_personal_context = world is not None
@@ -511,11 +576,7 @@ class ConversationService:
         outcome = await self._outcome_from_understanding(
             current_user, result, world, timezone_name
         )
-        self._remember_outcome(current_user, outcome)
-        if isinstance(result, ConversationTurn) and result.reply:
-            self._remember_general_turn(
-                current_user, message, result.reply, response_language
-            )
+        await self._remember_outcome(outcome)
         return outcome
 
     async def _outcome_from_understanding(
@@ -550,6 +611,13 @@ class ConversationService:
                     task_title=task.title,
                     task_status=task.status,
                     project_name=task.project_name,
+                    reference_kind="task",
+                    reference_id=task.task_id,
+                    reference_label=task.title,
+                    reference_metadata={
+                        "project_id": str(task.project_id),
+                        "project": task.project_name,
+                    },
                 )
             return Outcome(
                 kind="conversation",
@@ -643,6 +711,7 @@ class ConversationService:
         the Responder's job; the service only carries executed/action."""
         return ConversationResponse(
             executed=outcome.executed,
+            thread_id=self._current_thread_id,
             action=outcome.action,
             reply=self._responder.render(outcome, language=language),
             language=language,
@@ -682,6 +751,9 @@ class ConversationService:
                 executed=True,
                 action=action.action,
                 project_name=project.name,
+                reference_kind="project",
+                reference_id=project.id,
+                reference_label=project.name,
             )
 
         if action.action == registry.TASK_CREATE:
@@ -719,6 +791,13 @@ class ConversationService:
                 action=action.action,
                 task_title=task.title,
                 project_name=project_name,
+                reference_kind="task",
+                reference_id=task.id,
+                reference_label=task.title,
+                reference_metadata={
+                    "project_id": str(project_id),
+                    "project": project_name or "",
+                },
             )
 
         if action.action == registry.TASK_LIST:
@@ -778,6 +857,10 @@ class ConversationService:
                     ),
                     None,
                 ),
+                reference_kind="task",
+                reference_id=task.id,
+                reference_label=task.title,
+                reference_metadata={"project_id": str(action.project_id)},
             )
 
         if action.action == registry.ACTIVITY_RECALL:
@@ -828,6 +911,9 @@ class ConversationService:
                 reminder_title=reminder.title,
                 reminder_due_at=reminder.due_at,
                 reminder_timezone=reminder.timezone,
+                reference_kind="reminder",
+                reference_id=reminder.id,
+                reference_label=reminder.title,
             )
 
         if action.action == registry.REMINDER_LIST:
@@ -850,6 +936,11 @@ class ConversationService:
                     )
                     for reminder in open_reminders
                 ),
+                reference_kind="reminder" if len(open_reminders) == 1 else None,
+                reference_id=open_reminders[0].id if len(open_reminders) == 1 else None,
+                reference_label=(
+                    open_reminders[0].title if len(open_reminders) == 1 else None
+                ),
             )
 
         if action.action in {
@@ -871,6 +962,9 @@ class ConversationService:
                 action=action.action,
                 reminder_title=reminder.title,
                 reminder_status=reminder.status,
+                reference_kind="reminder",
+                reference_id=reminder.id,
+                reference_label=reminder.title,
             )
 
         if action.action == registry.NOTIFICATION_LIST:
@@ -885,6 +979,9 @@ class ConversationService:
                 notifications=tuple(
                     (item.title, item.body, item.status) for item in visible
                 ),
+                reference_kind="notification" if len(visible) == 1 else None,
+                reference_id=visible[0].id if len(visible) == 1 else None,
+                reference_label=visible[0].title if len(visible) == 1 else None,
             )
 
         if action.action in {
@@ -906,6 +1003,9 @@ class ConversationService:
                 action=action.action,
                 notification_title=notification.title,
                 notification_status=notification.status,
+                reference_kind="notification",
+                reference_id=notification.id,
+                reference_label=notification.title,
             )
 
         if action.action == registry.NOTE_CREATE:
@@ -922,6 +1022,9 @@ class ConversationService:
                 executed=True,
                 action=action.action,
                 note_title=note.title,
+                reference_kind="note",
+                reference_id=note.id,
+                reference_label=note.title,
             )
 
         if action.action == registry.NOTE_LIST:
@@ -935,6 +1038,9 @@ class ConversationService:
                 action=action.action,
                 note_status=note_status,
                 notes=tuple((note.title, note.content) for note in notes),
+                reference_kind="note" if len(notes) == 1 else None,
+                reference_id=notes[0].id if len(notes) == 1 else None,
+                reference_label=notes[0].title if len(notes) == 1 else None,
             )
 
         if action.action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
@@ -962,6 +1068,9 @@ class ConversationService:
                 action=action.action,
                 note_title=note.title,
                 note_status=note.status,
+                reference_kind="note",
+                reference_id=note.id,
+                reference_label=note.title,
             )
 
         if action.action == registry.LIST_CREATE:
@@ -970,11 +1079,15 @@ class ConversationService:
                 current_user, ListCreate(title=action.list_title)
             )
             return Outcome(kind="list_created", executed=True, action=action.action,
-                           list_title=value.title)
+                           list_title=value.title, reference_kind="list",
+                           reference_id=value.id, reference_label=value.title)
         if action.action == registry.LIST_LIST:
             values = await self._lists.list_lists(current_user)
             return Outcome(kind="list_list", executed=True, action=action.action,
-                           list_titles=tuple(value.title for value in values))
+                           list_titles=tuple(value.title for value in values),
+                           reference_kind="list" if len(values) == 1 else None,
+                           reference_id=values[0].id if len(values) == 1 else None,
+                           reference_label=values[0].title if len(values) == 1 else None)
         if action.action == registry.LIST_ADD_ITEM:
             assert action.list_id is not None and action.list_item_content is not None
             item = await self._lists.create_item(
@@ -982,7 +1095,9 @@ class ConversationService:
                 ListItemCreate(content=action.list_item_content),
             )
             return Outcome(kind="list_item_added", executed=True, action=action.action,
-                           list_title=action.list_title, list_item_content=item.content)
+                           list_title=action.list_title, list_item_content=item.content,
+                           reference_kind="list", reference_id=action.list_id,
+                           reference_label=action.list_title)
         if action.action == registry.LIST_COMPLETE_ITEM:
             assert action.list_id is not None and action.list_item_id is not None
             item = await self._lists.update_item(
@@ -990,14 +1105,17 @@ class ConversationService:
                 ListItemUpdate(status="complete"),
             )
             return Outcome(kind="list_item_completed", executed=True, action=action.action,
-                           list_title=action.list_title, list_item_content=item.content)
+                           list_title=action.list_title, list_item_content=item.content,
+                           reference_kind="list", reference_id=action.list_id,
+                           reference_label=action.list_title)
         if action.action == registry.LIST_ARCHIVE:
             assert action.list_id is not None
             value = await self._lists.update_list(
                 current_user, action.list_id, ListUpdate(status="archived")
             )
             return Outcome(kind="list_archived", executed=True, action=action.action,
-                           list_title=value.title)
+                           list_title=value.title, reference_kind="list",
+                           reference_id=value.id, reference_label=value.title)
 
         # Registry membership was checked upstream; reaching here is a bug.
         raise UnknownActionError(action.action)
@@ -1234,9 +1352,16 @@ class ConversationService:
     ) -> TaskRef:
         target = (reference or "").strip().lower()
         if target in self._PRONOUN_REFS:
-            ctx = self._context_payload_user_task()
-            if ctx is not None:
-                target = ctx.title.lower()
+            ctx = self._durable_reference("task")
+            if ctx is not None and ctx.entity_id is not None:
+                matches = [
+                    task for task in world.tasks
+                    if task.task_id == ctx.entity_id
+                    and (not require_active or task.status == "active")
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ctx.display_text)
 
         if not target:
             raise CompletionTargetNotFoundError("that task")
@@ -1259,6 +1384,13 @@ class ConversationService:
         self, reference: str | None, world: WorldView
     ) -> ProjectRef:
         target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS:
+            ref = self._durable_reference("project")
+            if ref is not None and ref.entity_id is not None:
+                matches = [p for p in world.projects if p.project_id == ref.entity_id]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
         exact = [p for p in world.projects if p.name.lower() == target]
         if len(exact) == 1:
             return exact[0]
@@ -1276,17 +1408,29 @@ class ConversationService:
     def _resolve_context_project(
         self, current_user: User, world: WorldView
     ) -> ProjectRef:
-        if self._context_store is None:
+        ref = self._durable_reference("project")
+        if ref is None or ref.entity_id is None:
             raise CompletionTargetNotFoundError("a project")
-        ref = self._context_store.get_last_project(current_user.id)
-        if ref is None:
-            raise CompletionTargetNotFoundError("a project")
-        return self._resolve_project_reference(ref.name, world)
+        matches = [p for p in world.projects if p.project_id == ref.entity_id]
+        if len(matches) == 1:
+            return matches[0]
+        raise CompletionTargetNotFoundError(ref.display_text)
 
     def _resolve_reminder_reference(
         self, reference: str | None, world: WorldView
     ) -> ReminderRef:
         target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS | {"that reminder", "the reminder"}:
+            ref = self._durable_reference("reminder")
+            if ref is not None and ref.entity_id is not None:
+                matches = [
+                    reminder for reminder in world.reminders
+                    if reminder.reminder_id == ref.entity_id
+                    and reminder.status in {"scheduled", "due"}
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
         matches = [
             reminder
             for reminder in world.reminders
@@ -1307,6 +1451,17 @@ class ConversationService:
         self, reference: str | None, world: WorldView
     ) -> NotificationRef:
         target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS | {"that notification"}:
+            ref = self._durable_reference("notification")
+            if ref is not None and ref.entity_id is not None:
+                matches = [
+                    item for item in world.notifications
+                    if item.notification_id == ref.entity_id
+                    and item.status != "dismissed"
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
         candidates = [
             item for item in world.notifications if item.status != "dismissed"
         ]
@@ -1328,6 +1483,16 @@ class ConversationService:
         self, reference: str | None, world: WorldView
     ) -> NoteRef:
         target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS | {"that note"}:
+            ref = self._durable_reference("note")
+            if ref is not None and ref.entity_id is not None:
+                matches = [
+                    note for note in world.notes
+                    if note.note_id == ref.entity_id and note.status == "active"
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
         matches = [
             note
             for note in world.notes
@@ -1343,6 +1508,16 @@ class ConversationService:
 
     def _resolve_list_reference(self, reference: str | None, world: WorldView) -> ListRef:
         target = (reference or "").strip().lower()
+        if target in self._PRONOUN_REFS | {"that list"}:
+            ref = self._durable_reference("list")
+            if ref is not None and ref.entity_id is not None:
+                matches = [
+                    value for value in world.lists
+                    if value.list_id == ref.entity_id and value.status == "active"
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
         matches = [value for value in world.lists if value.status == "active" and target
                    and (target in value.title.lower() or value.title.lower() in target)]
         if len(matches) == 1:
@@ -1393,67 +1568,72 @@ class ConversationService:
         include_personal_context: bool = True,
         include_general_context: bool = False,
     ) -> dict | None:
-        if self._context_store is None:
-            return None
         payload: dict = {}
         if include_personal_context:
-            task_ref = self._context_store.get_last_task(current_user.id)
-            project_ref = self._context_store.get_last_project(current_user.id)
+            task_ref = self._durable_reference("task")
+            project_ref = self._durable_reference("project")
             if task_ref is not None:
                 payload["last_grounded_entity"] = {
                     "kind": "task",
-                    "title": task_ref.title,
-                    "project": task_ref.project_name,
+                    "title": task_ref.display_text,
+                    **task_ref.metadata,
                 }
             if project_ref is not None:
                 payload["last_grounded_project"] = {
                     "kind": "project",
-                    "name": project_ref.name,
+                    "name": project_ref.display_text,
                 }
         elif include_general_context:
-            turn = self._context_store.get_last_general_turn(current_user.id)
-            if turn is not None:
+            prior = self._durable_reference("prior_result")
+            if prior is not None:
                 payload["previous_general_turn"] = {
-                    "message": turn.message,
-                    "reply": turn.reply,
-                    "language": turn.language,
+                    "message": str(prior.metadata.get("message", "")),
+                    "reply": prior.display_text,
+                    "language": str(prior.metadata.get("language", "en")),
                 }
+            turns: tuple[RecentTurn, ...] = getattr(
+                self, "_current_recent_turns", ()
+            )
+            if turns:
+                payload["recent_turns"] = [
+                    {
+                        "role": turn.role,
+                        "content": turn.content,
+                        "language": turn.language,
+                    }
+                    for turn in turns
+                ]
         return payload or None
 
-    def _remember_general_turn(
-        self, current_user: User, message: str, reply: str, language: str
-    ) -> None:
-        if self._context_store is None:
-            return
-        self._context_store.set_last_general_turn(
-            current_user.id,
-            GeneralConversationTurn(
-                message=message[:2000],
-                reply=reply[:2000],
-                language=language,
-            ),
+    def _durable_reference(self, kind: str) -> DurableReference | None:
+        references: dict[str, DurableReference] = getattr(
+            self, "_current_references", {}
         )
+        return references.get(kind)
 
-    def _context_payload_user_task(self) -> GroundedTaskReference | None:
-        # Set transiently by _outcome_from_understanding for the current turn.
-        return getattr(self, "_current_context_task", None)
-
-    def _remember_outcome(self, current_user: User, outcome: Outcome) -> None:
-        if self._context_store is None:
+    async def _remember_outcome(self, outcome: Outcome) -> None:
+        if not outcome.reference_kind or not outcome.reference_label:
             return
-        if outcome.task_title and outcome.project_name:
-            self._context_store.set_last_task(
-                current_user.id,
-                GroundedTaskReference(
-                    title=outcome.task_title,
-                    project_name=outcome.project_name,
-                ),
-            )
-        if outcome.project_name:
-            self._context_store.set_last_project(
-                current_user.id,
-                GroundedProjectReference(name=outcome.project_name),
-            )
+        await self._context_store.set_reference(
+            self._current_thread_id,
+            kind=outcome.reference_kind,
+            entity_id=outcome.reference_id,
+            display_text=outcome.reference_label,
+            metadata=outcome.reference_metadata,
+        )
+        if outcome.reference_kind == "task" and outcome.reference_metadata:
+            project_id = outcome.reference_metadata.get("project_id")
+            project_name = outcome.reference_metadata.get("project")
+            if project_id and project_name:
+                await self._context_store.set_reference(
+                    self._current_thread_id,
+                    kind="project",
+                    entity_id=uuid.UUID(project_id),
+                    display_text=project_name,
+                )
+        self._current_references = await self._context_store.references(
+            self._current_thread_id
+        )
 
     def _window_recent(
         self, activities: list[Activity]

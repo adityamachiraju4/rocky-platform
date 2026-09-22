@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
+import uuid
 
 from app.core.time import UTC, utc_to_local
 
@@ -121,6 +122,12 @@ class Outcome:
         "project", "task", "reminder", "notification", "note", "list"
     ] = "task"
     reply: str | None = None
+    # Durable conversational grounding; ids are revalidated against the
+    # authoritative owned WorldView before later mutations.
+    reference_kind: str | None = None
+    reference_id: uuid.UUID | None = None
+    reference_label: str | None = None
+    reference_metadata: dict[str, str] | None = None
 
 
 class Responder(Protocol):

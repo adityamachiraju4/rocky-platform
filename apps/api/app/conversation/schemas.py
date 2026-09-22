@@ -50,6 +50,7 @@ class ConversationRequest(BaseModel):
     no owner, no session. Ownership derives from the authenticated user."""
 
     message: str = Field(min_length=1, max_length=2000)
+    thread_id: uuid.UUID | None = None
     timezone: str | None = Field(default=None, max_length=128)
     language: str | None = Field(default=None, min_length=2, max_length=35)
     location_context: "LocationContext | None" = None
@@ -74,6 +75,16 @@ class ConversationResponse(BaseModel):
     """
 
     executed: bool
+    thread_id: uuid.UUID
     action: str | None = None
     reply: str
     language: str = Field(min_length=2, max_length=35)
+
+
+class ConversationThreadCreate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ConversationThreadRead(BaseModel):
+    id: uuid.UUID
+    title: str | None = None

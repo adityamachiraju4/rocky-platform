@@ -17,8 +17,14 @@ from fastapi import APIRouter, HTTPException, status
 from app.auth.dependencies import CurrentUserDep
 
 from app.conversation.dependencies import ConversationServiceDep
+from app.conversation.context import ConversationThreadNotFoundError
 from app.conversation.exceptions import UnknownActionError
-from app.conversation.schemas import ConversationRequest, ConversationResponse
+from app.conversation.schemas import (
+    ConversationRequest,
+    ConversationResponse,
+    ConversationThreadCreate,
+    ConversationThreadRead,
+)
 
 router = APIRouter(prefix="/conversation", tags=["conversation"])
 logger = logging.getLogger(__name__)
@@ -35,6 +41,7 @@ async def converse(
         response = await service.handle(
             current_user,
             payload.message,
+            thread_id=payload.thread_id,
             timezone_name=payload.timezone,
             language=payload.language,
             location_context=payload.location_context,
@@ -45,6 +52,11 @@ async def converse(
             extra={"selected_response_language": response.language},
         )
         return response
+    except ConversationThreadNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation thread not found.",
+        ) from exc
     except UnknownActionError as exc:
         # The resolver proposed something outside the closed registry. This is
         # never the caller's fault; surface it as an internal error.
@@ -57,3 +69,17 @@ async def converse(
             "Conversation request complete: elapsed_ms=%.1f",
             (time.perf_counter() - started) * 1000,
         )
+
+
+@router.post(
+    "/threads",
+    response_model=ConversationThreadRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_conversation_thread(
+    payload: ConversationThreadCreate,
+    current_user: CurrentUserDep,
+    service: ConversationServiceDep,
+) -> ConversationThreadRead:
+    thread = await service.create_thread(current_user, title=payload.title)
+    return ConversationThreadRead(id=thread.id, title=thread.title)

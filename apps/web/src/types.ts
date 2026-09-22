@@ -100,6 +100,7 @@ export interface Activity {
 
 export interface ConversationRequest {
   message: string;
+  thread_id?: UUID | null;
   timezone?: string | null;
   language?: string | null;
   location_context?: DeviceLocationContext | null;
@@ -114,6 +115,7 @@ export interface DeviceLocationContext {
 
 export interface ConversationResponse {
   executed: boolean;
+  thread_id: UUID;
   action: string | null;
   reply: string;
   language: string;

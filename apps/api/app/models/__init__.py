@@ -18,6 +18,11 @@ from app.models.session import Session
 from app.models.task import Task
 from app.models.user import User
 from app.models.auth_action_token import AuthActionToken
+from app.models.conversation import (
+    ConversationThread,
+    ConversationTurnRecord,
+    GroundedReference,
+)
 
 __all__ = [
     "User",
@@ -34,4 +39,7 @@ __all__ = [
     "Task",
     "Activity",
     "AuthActionToken",
+    "ConversationThread",
+    "ConversationTurnRecord",
+    "GroundedReference",
 ]

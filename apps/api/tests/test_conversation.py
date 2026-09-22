@@ -46,6 +46,12 @@ from app.models.scheduled_job import ScheduledJob
 from app.notifications.schemas import NotificationCreate
 from app.notifications.service import NotificationsService
 from app.models.user import User
+from app.models.conversation import ConversationThread, ConversationTurnRecord
+from app.conversation.context import (
+    MAX_STORED_TURNS,
+    RECENT_TURN_LIMIT,
+    ConversationContextStore,
+)
 
 import app.models  # noqa: F401  (populate Base.metadata before create_all)
 
@@ -1358,12 +1364,11 @@ async def test_general_knowledge_is_returned_as_a_normal_conversation(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body == {
-        "executed": False,
-        "action": None,
-        "reply": replies[message],
-        "language": "en",
-    }
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == replies[message]
+    assert body["language"] == "en"
+    assert uuid.UUID(body["thread_id"])
     assert reply_fragment.lower() in body["reply"].lower()
     assert provider.calls[0]["include_personal_context"] is False
 
@@ -1460,13 +1465,14 @@ async def test_general_follow_up_receives_only_one_bounded_general_turn(ctx) -> 
     assert second.status_code == 200, second.text
     call = second_provider.calls[0]
     assert call["include_personal_context"] is False
-    assert call["context"] == {
-        "previous_general_turn": {
-            "message": "What is Docker?",
-            "reply": "Docker packages applications and dependencies into containers.",
-            "language": "en",
-        }
+    assert call["context"]["previous_general_turn"] == {
+        "message": "What is Docker?",
+        "reply": "Docker packages applications and dependencies into containers.",
+        "language": "en",
     }
+    assert [turn["role"] for turn in call["context"]["recent_turns"]] == [
+        "user", "assistant"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1891,12 +1897,10 @@ async def test_multilingual_follow_up_carries_language_and_bounded_subject(ctx) 
     assert response.status_code == 200, response.text
     call = second_provider.calls[0]
     assert call["response_language"] == "te"
-    assert call["context"] == {
-        "previous_general_turn": {
-            "message": "Docker అంటే ఏమిటి?",
-            "reply": "Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది.",
-            "language": "te",
-        }
+    assert call["context"]["previous_general_turn"] == {
+        "message": "Docker అంటే ఏమిటి?",
+        "reply": "Docker యాప్‌లను కంటైనర్లలో నడుపుతుంది.",
+        "language": "te",
     }
 
 
@@ -1932,12 +1936,10 @@ async def test_tamil_follow_up_carries_language_and_bounded_subject(ctx) -> None
     assert response.status_code == 200, response.text
     call = second_provider.calls[0]
     assert call["response_language"] == "ta"
-    assert call["context"] == {
-        "previous_general_turn": {
-            "message": "Docker என்றால் என்ன?",
-            "reply": "Docker செயலிகளை கண்டெய்னர்களில் இயக்குகிறது.",
-            "language": "ta",
-        }
+    assert call["context"]["previous_general_turn"] == {
+        "message": "Docker என்றால் என்ன?",
+        "reply": "Docker செயலிகளை கண்டெய்னர்களில் இயக்குகிறது.",
+        "language": "ta",
     }
 
 
@@ -1956,12 +1958,12 @@ async def test_multilingual_provider_clarification_preserves_localized_prompt(ct
     )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {
-        "executed": False,
-        "action": None,
-        "reply": "ఏ పని గురించి అడుగుతున్నారు?",
-        "language": "te",
-    }
+    body = response.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "ఏ పని గురించి అడుగుతున్నారు?"
+    assert body["language"] == "te"
+    assert uuid.UUID(body["thread_id"])
 
 
 @pytest.mark.asyncio
@@ -2200,12 +2202,12 @@ async def test_general_provider_failure_returns_clean_non_executing_fallback(ctx
     )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {
-        "executed": False,
-        "action": None,
-        "reply": "I couldn't answer that right now. Please try again.",
-        "language": "en",
-    }
+    body = response.json()
+    assert body["executed"] is False
+    assert body["action"] is None
+    assert body["reply"] == "I couldn't answer that right now. Please try again."
+    assert body["language"] == "en"
+    assert uuid.UUID(body["thread_id"])
 
 
 @pytest.mark.asyncio
@@ -3046,6 +3048,210 @@ async def test_unknown_action_refused(ctx) -> None:
         service = ConversationService(session, resolver=_RogueResolver())
         with pytest.raises(UnknownActionError):
             await service.handle(user, "delete everything")
+
+
+# --------------------------------------------------------------------------
+# CI-2 durable threads and bounded context.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_thread_and_turns_persist_across_requests(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="A durable reply.")
+    )
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    first = await client.post(
+        "/conversation", json={"message": "Hello Rocky"}, headers=headers
+    )
+    second = await client.post(
+        "/conversation", json={"message": "Hello again"}, headers=headers
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["thread_id"] == second.json()["thread_id"]
+    assert len(provider.calls) == 2
+    async with sessionmaker() as session:
+        thread = await session.scalar(
+            select(ConversationThread).where(
+                ConversationThread.user_id == uuid.UUID(user_id),
+                ConversationThread.default_key == "default",
+            )
+        )
+        assert thread is not None
+        turns = (
+            await session.scalars(
+                select(ConversationTurnRecord).where(
+                    ConversationTurnRecord.thread_id == thread.id
+                )
+            )
+        ).all()
+        assert [turn.role for turn in turns] == [
+            "user", "assistant", "user", "assistant"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_thread_ownership_is_not_disclosed(ctx) -> None:
+    client, sessionmaker = ctx
+    owner_headers, _ = await _auth_headers(client, sessionmaker)
+    other_headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/conversation/threads", json={"title": "Private"}, headers=owner_headers
+    )
+    assert created.status_code == 201, created.text
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Hello", "thread_id": created.json()["id"]},
+        headers=other_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation thread not found."
+
+
+@pytest.mark.asyncio
+async def test_threads_isolate_context_for_same_user(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    first_thread = await client.post(
+        "/conversation/threads", json={"title": "First"}, headers=headers
+    )
+    second_thread = await client.post(
+        "/conversation/threads", json={"title": "Second"}, headers=headers
+    )
+    first_id = first_thread.json()["id"]
+    second_id = second_thread.json()["id"]
+
+    created = await client.post(
+        "/conversation",
+        json={"message": "Create a project called Japan", "thread_id": first_id},
+        headers=headers,
+    )
+    assert created.json()["executed"] is True
+
+    isolated = await client.post(
+        "/conversation",
+        json={"message": "Create a task called Book flights", "thread_id": second_id},
+        headers=headers,
+    )
+    assert isolated.status_code == 200
+    assert isolated.json()["executed"] is False
+    assert "project" in isolated.json()["reply"].lower()
+
+    continued = await client.post(
+        "/conversation",
+        json={"message": "Create a task called Book flights", "thread_id": first_id},
+        headers=headers,
+    )
+    assert continued.json()["executed"] is True
+    assert "Japan" in continued.json()["reply"]
+
+
+@pytest.mark.asyncio
+async def test_durable_reminder_reference_is_revalidated(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    created = await client.post(
+        "/conversation",
+        json={"message": "Remind me tomorrow at 7 PM to call Rahul"},
+        headers=headers,
+    )
+    assert created.json()["executed"] is True
+
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="reminder.cancel",
+            reference="that reminder",
+        )
+    )
+    cancelled = await client.post(
+        "/conversation",
+        json={"message": "Cancel that reminder"},
+        headers=headers,
+    )
+    assert cancelled.json()["executed"] is True
+    assert "cancelled" in cancelled.json()["reply"]
+
+    stale = await client.post(
+        "/conversation",
+        json={"message": "Cancel that reminder"},
+        headers=headers,
+    )
+    assert stale.json()["executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_note_and_list_references_survive_service_instances(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    note = await client.post(
+        "/conversation",
+        json={"message": "Create a note called Launch ideas"},
+        headers=headers,
+    )
+    assert note.json()["executed"] is True
+    _use_fake_provider(
+        ActionProposal(kind="action", action="note.archive", reference="that note")
+    )
+    archived = await client.post(
+        "/conversation", json={"message": "Archive that note"}, headers=headers
+    )
+    assert archived.json()["executed"] is True
+
+    created_list = await client.post(
+        "/conversation",
+        json={"message": "Create a groceries list"},
+        headers=headers,
+    )
+    assert created_list.json()["executed"] is True
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="list.add_item",
+            reference="that list",
+            arguments={"content": "milk"},
+        )
+    )
+    added = await client.post(
+        "/conversation", json={"message": "Add milk to that list"}, headers=headers
+    )
+    assert added.json()["executed"] is True
+    assert "milk" in added.json()["reply"]
+
+
+@pytest.mark.asyncio
+async def test_context_store_bounds_retained_and_prompt_turns(ctx) -> None:
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    assert headers
+    async with sessionmaker() as session:
+        store = ConversationContextStore(session)
+        thread = await store.resolve_thread(uuid.UUID(user_id), None)
+        for index in range(MAX_STORED_TURNS + 5):
+            await store.add_turn(
+                thread,
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"turn-{index}",
+                language="en",
+            )
+        stored = (
+            await session.scalars(
+                select(ConversationTurnRecord).where(
+                    ConversationTurnRecord.thread_id == thread.id
+                )
+            )
+        ).all()
+        recent = await store.recent_turns(thread.id)
+
+    assert len(stored) == MAX_STORED_TURNS
+    assert len(recent) == RECENT_TURN_LIMIT
+    assert recent[-1].content == f"turn-{MAX_STORED_TURNS + 4}"
 
 
 # A stub conforming to the Resolver Protocol, asserted structurally.
