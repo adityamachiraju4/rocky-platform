@@ -489,6 +489,7 @@ class HardcodedResolver:
                     raise AmbiguousReferenceError(
                         [p.name for p in pmatches]
                     )
+                raise CompletionTargetNotFoundError(wanted)
             raise NoMatchError(message)
 
         # --- activity.recall: continuity / history cues ---

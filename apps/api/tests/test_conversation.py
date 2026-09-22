@@ -60,10 +60,12 @@ from app.conversation.understanding import (
     ActionProposal,
     Clarification,
     ConversationTurn,
+    PersonalContextRequest,
     UNDERSTANDING_JSON_SCHEMA,
     UnderstandingProviderError,
     UnderstandingResult,
     Unsupported,
+    parse_understanding_payload,
     safe_world_payload,
 )
 from app.live.dependencies import get_live_intelligence_service
@@ -76,18 +78,23 @@ PASSWORD = "correct horse battery"
 
 
 class _FakeUnderstandingProvider:
-    def __init__(self, result: object | Exception) -> None:
-        self._result = result
+    def __init__(
+        self, result: object | Exception | list[object | Exception]
+    ) -> None:
+        self._results = result if isinstance(result, list) else [result]
         self.calls: list[dict[str, object]] = []
 
     async def understand(self, **_: object) -> object:
         self.calls.append(_)
-        if isinstance(self._result, Exception):
-            raise self._result
-        return self._result
+        result = self._results[min(len(self.calls) - 1, len(self._results) - 1)]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
-def _use_fake_provider(result: object | Exception) -> _FakeUnderstandingProvider:
+def _use_fake_provider(
+    result: object | Exception | list[object | Exception],
+) -> _FakeUnderstandingProvider:
     provider = _FakeUnderstandingProvider(result)
     fastapi_app.dependency_overrides[get_understanding_provider] = (
         lambda: provider
@@ -918,6 +925,27 @@ def test_understanding_schema_is_strict_responses_api_shape() -> None:
     assert UNDERSTANDING_JSON_SCHEMA["additionalProperties"] is False
     assert set(UNDERSTANDING_JSON_SCHEMA["required"]) == set(properties)
     assert "null" in properties["reply"]["type"]
+    assert properties["reply"]["maxLength"] == 4000
+
+
+def test_understanding_schema_allows_useful_bounded_general_answers() -> None:
+    reply = "A useful explanation. " * 100
+    result = parse_understanding_payload(
+        {
+            "kind": "conversation",
+            "action": None,
+            "reference": None,
+            "arguments": None,
+            "recall_window": None,
+            "reply": reply,
+            "prompt": None,
+            "candidates": None,
+            "reason": None,
+        }
+    )
+
+    assert isinstance(result, ConversationTurn)
+    assert result.reply == reply
 
 
 def test_provider_allowed_actions_stay_synced_with_registry() -> None:
@@ -1293,6 +1321,8 @@ async def test_ordinary_conversation_uses_general_assistant_without_mutation(
 @pytest.mark.parametrize(
     ("message", "reply_fragment"),
     [
+        ("What is quantum computing?", "qubit"),
+        ("Explain recursion simply.", "itself"),
         ("What is photosynthesis?", "sunlight"),
         ("Explain Docker in simple terms.", "container"),
         ("What is the capital of Japan?", "Tokyo"),
@@ -1302,7 +1332,17 @@ async def test_general_knowledge_is_returned_as_a_normal_conversation(
     ctx, message: str, reply_fragment: str
 ) -> None:
     replies = {
-        "What is photosynthesis?": "Plants use sunlight to turn water and carbon dioxide into food.",
+        "What is quantum computing?": (
+            "Quantum computing uses qubits to process information through "
+            "quantum effects."
+        ),
+        "Explain recursion simply.": (
+            "Recursion is when a solution uses a smaller version of itself "
+            "until it reaches a stopping point."
+        ),
+        "What is photosynthesis?": (
+            "Plants use sunlight to turn water and carbon dioxide into food."
+        ),
         "Explain Docker in simple terms.": "Docker packages software in portable containers.",
         "What is the capital of Japan?": "The capital of Japan is Tokyo.",
     }
@@ -1326,6 +1366,35 @@ async def test_general_knowledge_is_returned_as_a_normal_conversation(
     }
     assert reply_fragment.lower() in body["reply"].lower()
     assert provider.calls[0]["include_personal_context"] is False
+
+
+@pytest.mark.asyncio
+async def test_general_question_does_not_build_personal_world(
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(
+            kind="conversation",
+            reply="The sky looks blue because air scatters blue light more strongly.",
+        )
+    )
+
+    async def _unexpected_world_build(*_args: object, **_kwargs: object) -> WorldView:
+        raise AssertionError("general route must not build the personal world")
+
+    monkeypatch.setattr(ConversationService, "_build_world", _unexpected_world_build)
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Why is the sky blue?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert "scatters blue light" in response.json()["reply"]
+    assert provider.calls[0]["world"] is None
 
 
 @pytest.mark.asyncio
@@ -1584,6 +1653,47 @@ async def test_live_weather_routes_before_general_assistant(ctx) -> None:
     assert body["action"] == "weather.current"
     assert "Hyderabad, India" in body["reply"]
     assert "fake-weather" in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_route_does_not_build_personal_world(
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Fabricated weather")
+    )
+    _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            WeatherReport(
+                location="London, UK",
+                window="current",
+                temperature_c=14.0,
+                source=SourceMetadata(
+                    provider="fake-weather",
+                    retrieved_at=datetime.now(timezone.utc),
+                    freshness="test",
+                ),
+            ),
+        )
+    )
+
+    async def _unexpected_world_build(*_args: object, **_kwargs: object) -> WorldView:
+        raise AssertionError("live route must not build the personal world")
+
+    monkeypatch.setattr(ConversationService, "_build_world", _unexpected_world_build)
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What's the weather in London?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "weather.current"
     assert provider.calls == []
 
 
@@ -1911,10 +2021,13 @@ async def test_general_question_does_not_send_grounded_personal_context(ctx) -> 
 @pytest.mark.asyncio
 async def test_personal_general_hybrid_may_send_bounded_rocky_context(ctx) -> None:
     provider = _use_fake_provider(
-        ConversationTurn(
-            kind="conversation",
-            reply="Start with the highest-impact active task.",
-        )
+        [
+            PersonalContextRequest(kind="personal_context"),
+            ConversationTurn(
+                kind="conversation",
+                reply="Start with the highest-impact active task.",
+            ),
+        ]
     )
     client, sessionmaker = ctx
     headers, _ = await _auth_headers(client, sessionmaker)
@@ -1928,7 +2041,9 @@ async def test_personal_general_hybrid_may_send_bounded_rocky_context(ctx) -> No
     )
 
     assert response.status_code == 200, response.text
-    call = provider.calls[0]
+    assert provider.calls[0]["include_personal_context"] is False
+    assert provider.calls[0]["world"] is None
+    call = provider.calls[1]
     assert call["include_personal_context"] is True
     world = call["world"]
     assert isinstance(world, WorldView)
@@ -1953,6 +2068,25 @@ async def test_live_information_request_is_honest_without_provider_call(ctx) -> 
     body = response.json()
     assert body["executed"] is False
     assert "don't have live access to weather" in body["reply"]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_current_news_never_uses_general_model_knowledge(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Fabricated current news")
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What is the latest AI news?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["executed"] is False
     assert provider.calls == []
 
 
@@ -2051,6 +2185,27 @@ async def test_provider_failure_degrades_without_mutation(ctx) -> None:
 
     fetched = await _get_task(client, headers, project_id, task["id"])
     assert fetched["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_general_provider_failure_returns_clean_non_executing_fallback(ctx) -> None:
+    _use_fake_provider(UnderstandingProviderError("boom"))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Why do leaves change color?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "executed": False,
+        "action": None,
+        "reply": "I couldn't answer that right now. Please try again.",
+        "language": "en",
+    }
 
 
 @pytest.mark.asyncio

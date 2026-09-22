@@ -40,6 +40,19 @@ class ConversationTurn:
 
 
 @dataclass(frozen=True)
+class PersonalContextRequest:
+    """Route decision requesting a second, grounded understanding pass.
+
+    The first understanding pass never receives Rocky's private world.  The
+    provider returns this result only when answering the message requires
+    personal Rocky data that cannot be represented as a direct action
+    proposal.
+    """
+
+    kind: Literal["personal_context"]
+
+
+@dataclass(frozen=True)
 class Clarification:
     kind: Literal["clarification"]
     prompt: str | None = None
@@ -53,7 +66,11 @@ class Unsupported:
 
 
 UnderstandingResult = (
-    ActionProposal | ConversationTurn | Clarification | Unsupported
+    ActionProposal
+    | ConversationTurn
+    | PersonalContextRequest
+    | Clarification
+    | Unsupported
 )
 
 
@@ -62,7 +79,7 @@ class UnderstandingProvider(Protocol):
         self,
         *,
         message: str,
-        world: WorldView,
+        world: WorldView | None,
         context: dict[str, Any] | None = None,
         include_personal_context: bool = True,
         response_language: str = "en",
@@ -74,15 +91,17 @@ class _UnderstandingPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["action", "conversation", "clarification", "unsupported"]
+    kind: Literal[
+        "action", "conversation", "personal_context", "clarification", "unsupported"
+    ]
     action: str | None = None
     reference: str | None = None
     arguments: dict[str, str] | None = None
     recall_window: Literal["recent", "yesterday"] | None = None
-    reply: str | None = Field(default=None, max_length=400)
-    prompt: str | None = Field(default=None, max_length=400)
+    reply: str | None = Field(default=None, max_length=4000)
+    prompt: str | None = Field(default=None, max_length=1000)
     candidates: list[str] | None = None
-    reason: str | None = Field(default=None, max_length=400)
+    reason: str | None = Field(default=None, max_length=1000)
 
     def to_result(self) -> UnderstandingResult:
         if self.kind == "action":
@@ -101,6 +120,8 @@ class _UnderstandingPayload(BaseModel):
                 reply=self.reply,
                 reference=self.reference,
             )
+        if self.kind == "personal_context":
+            return PersonalContextRequest(kind="personal_context")
         if self.kind == "clarification":
             return Clarification(
                 kind="clarification",
@@ -126,6 +147,7 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "enum": [
                 "action",
                 "conversation",
+                "personal_context",
                 "clarification",
                 "unsupported",
             ],
@@ -140,13 +162,13 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "enum": ["recent", "yesterday", None],
         },
-        "reply": {"type": ["string", "null"], "maxLength": 400},
-        "prompt": {"type": ["string", "null"], "maxLength": 400},
+        "reply": {"type": ["string", "null"], "maxLength": 4000},
+        "prompt": {"type": ["string", "null"], "maxLength": 1000},
         "candidates": {
             "type": ["array", "null"],
             "items": {"type": "string"},
         },
-        "reason": {"type": ["string", "null"], "maxLength": 400},
+        "reason": {"type": ["string", "null"], "maxLength": 1000},
     },
     "required": [
         "kind",

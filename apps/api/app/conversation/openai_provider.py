@@ -26,9 +26,12 @@ Return only the requested JSON shape. You do not execute actions.
 
 Classify the user's utterance as one of:
 - conversation: greetings, ordinary conversation, identity/help questions, or
-  a concise answer to a general knowledge, explanation, math, recipe, or humor
-request
+  a useful answer to a general knowledge, explanation, math, recipe, or humor
+  request
 - action: one allowed action proposal
+- personal_context: answering requires Rocky data, but the request is not one
+  direct action proposal. Use this only when rocky_world is absent. When
+  rocky_world is present, answer from those facts or ask for clarification.
 - clarification: the user is asking about an ambiguous prior reference
 - unsupported: the user asks for a capability Rocky does not support or for
   current information that requires live access (including current weather,
@@ -98,8 +101,9 @@ For list.create use only {"title": ...}. For list.add_item use the list title
 as reference and only {"content": ...}. For list.complete_item use the list
 title as reference and only {"item": ...}. For list.archive use the list
 title reference and no arguments. Never return list or item database IDs.
-Keep conversation replies natural and useful. Use at most two short, complete
-sentences and stay under 300 characters. Do not fabricate Rocky world facts.
+Keep conversation replies natural, useful, and concise by default. Use
+multiple paragraphs when they materially improve an explanation. Stay within
+the response schema's bounded output size. Do not fabricate Rocky world facts.
 General conversation never executes an action.
 """
 
@@ -127,7 +131,7 @@ class OpenAIUnderstandingProvider:
         self,
         *,
         message: str,
-        world: WorldView,
+        world: WorldView | None,
         context: dict[str, Any] | None = None,
         include_personal_context: bool = True,
         response_language: str = "en",
@@ -137,7 +141,7 @@ class OpenAIUnderstandingProvider:
             "context": context or {},
             "response_language": response_language,
         }
-        if include_personal_context:
+        if include_personal_context and world is not None:
             payload["rocky_world"] = safe_world_payload(world)
         self.last_error_code = None
 

@@ -2,10 +2,12 @@
 
 Flow for one turn:
 
-    build WorldView (via real domain services, scoped to current_user)
-        -> resolver.resolve(message, world)   [proposes only]
-        -> validate action against closed registry   [refuse if unknown]
-        -> validate arguments for that action
+    route without personal data
+        -> deterministic Rocky action fast path
+        -> deterministic live-information fast path
+        -> model-backed route/general-answer decision
+        -> build an owned WorldView only for a selected personal/action route
+        -> validate any action against the closed registry
         -> dispatch into the authoritative domain service on the SHARED session
         -> build a truthful reply from the service's actual returned object
 
@@ -98,6 +100,7 @@ from app.conversation.responder import (
 from app.conversation.understanding import (
     Clarification,
     ConversationTurn,
+    PersonalContextRequest,
     UnderstandingProvider,
     UnderstandingProviderError,
     UnderstandingResult,
@@ -107,12 +110,6 @@ from app.conversation.understanding import (
 
 logger = logging.getLogger(__name__)
 
-_PERSONAL_CONTEXT_PATTERN = re.compile(
-    r"\b(my|mine|task|project|reminder|notification|note|list|rocky task|"
-    r"finish|complete|create|add|archive|dismiss|remind me|tasks|tareas|tâches|"
-    r"naa|naaku|enti|cheyyi)\b|काम|कार्य|పనులు|வேலைகள்|タスク",
-    re.IGNORECASE,
-)
 _LIVE_INFORMATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "weather",
@@ -125,7 +122,8 @@ _LIVE_INFORMATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "news",
         re.compile(
-            r"\b(?:latest|current|today(?:'s)?)\s+news\b|\bnews today\b",
+            r"\b(?:latest|current|today(?:'s)?)\s+(?:\w+\s+){0,3}news\b|"
+            r"\bnews today\b",
             re.IGNORECASE,
         ),
     ),
@@ -326,17 +324,16 @@ class ConversationService:
     ) -> ConversationResponse:
         turn_language = response_language(message, language)
         resolver_message = normalize_capability_message(message)
-        world_started = time.perf_counter()
-        world = await self._build_world(current_user)
-        logger.info(
-            "Conversation world build complete: elapsed_ms=%.1f",
-            (time.perf_counter() - world_started) * 1000,
-        )
+        empty_world = WorldView(projects=(), tasks=())
+        grounded_world: WorldView | None = None
 
         # Resolver proposes; it executes nothing. Deterministic handling stays
-        # first so obvious/offline cases never depend on a model provider.
+        # first so obvious/offline cases never depend on a model provider. It
+        # first receives an empty world: this recognizes command shape without
+        # loading private data. Reference-dependent commands request a grounded
+        # retry below.
         try:
-            action = self._resolver.resolve(resolver_message, world)
+            action = self._resolver.resolve(resolver_message, empty_world)
         except NoMatchError:
             if self._live_service is not None:
                 live_intent = self._live_service.resolve(message)
@@ -367,39 +364,52 @@ class ConversationService:
             outcome = await self._try_provider(
                 current_user,
                 message,
-                world,
+                None,
                 timezone_name,
                 turn_language,
                 fallback=Outcome(kind="no_match", executed=False),
             )
             return self._respond(outcome, turn_language)
-        except CompletionTargetNotFoundError as exc:
-            outcome = await self._try_provider(
-                current_user,
-                message,
-                world,
-                timezone_name,
-                turn_language,
-                fallback=Outcome(
-                    kind="target_not_found",
-                    executed=False,
-                    target=exc.target,
-                    target_type=(
-                        "reminder"
-                        if "reminder" in message.lower()
-                        else (
-                            "notification"
-                            if "notification" in message.lower()
-                            else (
-                                "note" if "note" in message.lower() else "task"
-                                if "list" not in message.lower()
-                                else "list"
-                            )
-                        )
+        except CompletionTargetNotFoundError:
+            # Empty-world resolution proved that this looks like a Rocky
+            # command whose reference must be grounded. Load personal data
+            # only now, then retry the deterministic resolver.
+            grounded_world = await self._load_world(current_user)
+            try:
+                action = self._resolver.resolve(
+                    resolver_message, grounded_world
+                )
+            except NoMatchError:
+                outcome = await self._try_provider(
+                    current_user,
+                    message,
+                    grounded_world,
+                    timezone_name,
+                    turn_language,
+                    fallback=Outcome(kind="no_match", executed=False),
+                )
+                return self._respond(outcome, turn_language)
+            except CompletionTargetNotFoundError as grounded_exc:
+                outcome = await self._try_provider(
+                    current_user,
+                    message,
+                    grounded_world,
+                    timezone_name,
+                    turn_language,
+                    fallback=self._target_not_found_outcome(
+                        message, grounded_exc.target
                     ),
-                ),
-            )
-            return self._respond(outcome, turn_language)
+                )
+                return self._respond(outcome, turn_language)
+            except AmbiguousReferenceError as grounded_exc:
+                return self._respond(
+                    Outcome(
+                        kind="ambiguous",
+                        executed=False,
+                        candidates=tuple(grounded_exc.candidates),
+                    ),
+                    turn_language,
+                )
         except AmbiguousReferenceError as exc:
             return self._respond(
                 Outcome(
@@ -414,6 +424,9 @@ class ConversationService:
         if not registry.is_allowed(action.action):
             raise UnknownActionError(action.action)
 
+        if grounded_world is None and self._action_requires_world(action.action):
+            grounded_world = await self._load_world(current_user)
+        world = grounded_world or empty_world
         outcome = await self._dispatch(
             current_user, action, world, timezone_name
         )
@@ -424,7 +437,7 @@ class ConversationService:
         self,
         current_user: User,
         message: str,
-        world: WorldView,
+        world: WorldView | None,
         timezone_name: str | None,
         response_language: str,
         fallback: Outcome,
@@ -439,14 +452,17 @@ class ConversationService:
         )
         try:
             provider_started = time.perf_counter()
-            include_personal_context = self._needs_personal_context(message)
+            include_personal_context = world is not None
             result = await self._understanding_provider.understand(
                 message=message,
                 world=world,
                 context=self._context_payload(
                     current_user,
                     include_personal_context=include_personal_context,
-                    include_general_context=is_general_follow_up(message),
+                    include_general_context=(
+                        not include_personal_context
+                        and is_general_follow_up(message)
+                    ),
                 ),
                 include_personal_context=include_personal_context,
                 response_language=response_language,
@@ -457,11 +473,40 @@ class ConversationService:
                 (time.perf_counter() - provider_started) * 1000,
                 extra={"provider_error_code": exc.code},
             )
+            if fallback.kind == "no_match":
+                return Outcome(
+                    kind="conversation",
+                    executed=False,
+                    reply="I couldn't answer that right now. Please try again.",
+                )
             return fallback
         logger.info(
             "Conversation understanding provider complete: elapsed_ms=%.1f",
             (time.perf_counter() - provider_started) * 1000,
         )
+
+        if isinstance(result, PersonalContextRequest):
+            if world is not None:
+                return Outcome(
+                    kind="unsupported",
+                    executed=False,
+                    reply="I couldn't ground that request in your Rocky data.",
+                )
+            grounded_world = await self._load_world(current_user)
+            return await self._try_provider(
+                current_user,
+                message,
+                grounded_world,
+                timezone_name,
+                response_language,
+                fallback=fallback,
+            )
+
+        if world is None and (
+            isinstance(result, ActionProposal)
+            or (isinstance(result, ConversationTurn) and result.reference)
+        ):
+            world = await self._load_world(current_user)
 
         outcome = await self._outcome_from_understanding(
             current_user, result, world, timezone_name
@@ -477,11 +522,12 @@ class ConversationService:
         self,
         current_user: User,
         result: UnderstandingResult,
-        world: WorldView,
+        world: WorldView | None,
         timezone_name: str | None,
     ) -> Outcome:
         if isinstance(result, ConversationTurn):
             if result.reference:
+                assert world is not None
                 try:
                     task = self._resolve_task_reference(
                         result.reference, world, require_active=False
@@ -530,6 +576,7 @@ class ConversationService:
             return Outcome(kind="no_match", executed=False)
 
         proposal = result
+        assert world is not None
         if not registry.is_allowed(proposal.action):
             return Outcome(
                 kind="unsupported",
@@ -555,6 +602,38 @@ class ConversationService:
 
         return await self._dispatch(
             current_user, action, world, timezone_name
+        )
+
+    async def _load_world(self, current_user: User) -> WorldView:
+        """Load personal Rocky state only after routing selects that lane."""
+
+        world_started = time.perf_counter()
+        world = await self._build_world(current_user)
+        logger.info(
+            "Conversation world build complete: elapsed_ms=%.1f",
+            (time.perf_counter() - world_started) * 1000,
+        )
+        return world
+
+    @staticmethod
+    def _target_not_found_outcome(message: str, target: str) -> Outcome:
+        lowered = message.lower()
+        target_type = (
+            "reminder"
+            if "reminder" in lowered
+            else "notification"
+            if "notification" in lowered
+            else "note"
+            if "note" in lowered
+            else "list"
+            if "list" in lowered
+            else "task"
+        )
+        return Outcome(
+            kind="target_not_found",
+            executed=False,
+            target=target,
+            target_type=target_type,
         )
 
     def _respond(
@@ -1283,8 +1362,22 @@ class ConversationService:
         raise CompletionTargetNotFoundError(target or "that list item")
 
     @staticmethod
-    def _needs_personal_context(message: str) -> bool:
-        return _PERSONAL_CONTEXT_PATTERN.search(message) is not None
+    def _action_requires_world(action: str) -> bool:
+        return action in {
+            registry.TASK_LIST,
+            registry.TASK_CREATE,
+            registry.TASK_UPDATE,
+            registry.ACTIVITY_RECALL,
+            registry.REMINDER_COMPLETE,
+            registry.REMINDER_CANCEL,
+            registry.NOTIFICATION_READ,
+            registry.NOTIFICATION_DISMISS,
+            registry.NOTE_UPDATE,
+            registry.NOTE_ARCHIVE,
+            registry.LIST_ADD_ITEM,
+            registry.LIST_COMPLETE_ITEM,
+            registry.LIST_ARCHIVE,
+        }
 
     @staticmethod
     def _live_information_category(message: str) -> str | None:
@@ -1336,7 +1429,7 @@ class ConversationService:
             current_user.id,
             GeneralConversationTurn(
                 message=message[:2000],
-                reply=reply[:400],
+                reply=reply[:2000],
                 language=language,
             ),
         )
