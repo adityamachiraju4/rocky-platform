@@ -82,8 +82,10 @@ async def test_registration_creates_unverified_user_and_sends_verification(ctx, 
     assert message.recipient == "ada@example.com"
     assert message.reply_to == "support@rockyos.in"
     assert "Verify" in message.subject
-    assert token_from_message(message)
-    assert "http://localhost:5173/verify-email?" in message.html
+    token = token_from_message(message)
+    action_url = f"http://localhost:5173/verify-email?token={token}"
+    assert f'href="{action_url}"' in message.html
+    assert action_url in message.text
     async with sessionmaker() as session:
         stored = (await session.execute(select(AuthActionToken))).scalar_one()
         assert stored.token_hash not in message.html
@@ -177,7 +179,12 @@ async def test_password_reset_is_enumeration_safe_and_single_use(ctx, fake_trans
     assert existing.status_code == unknown.status_code == 202
     assert existing.json() == unknown.json()
     assert len(fake_transactional_email.messages) == 1
-    reset_token = token_from_message(fake_transactional_email.messages[0])
+    message = fake_transactional_email.messages[0]
+    reset_token = token_from_message(message)
+    action_url = f"http://localhost:5173/reset-password?token={reset_token}"
+    assert f'href="{action_url}"' in message.html
+    assert action_url in message.text
+    assert message.reply_to == "support@rockyos.in"
     async with sessionmaker() as session:
         user = await session.get(User, user_id)
         user.is_verified = True

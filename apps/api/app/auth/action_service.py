@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import html
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +29,7 @@ from app.transactional_email.provider import (
     TransactionalEmail,
     TransactionalEmailProvider,
 )
+from app.transactional_email.templates import render_auth_email
 
 VERIFY_EMAIL = "verify_email"
 RESET_PASSWORD = "reset_password"
@@ -93,24 +93,30 @@ class AuthActionService:
         if purpose == VERIFY_EMAIL:
             url = f"{get_public_app_url()}/verify-email?{query}"
             subject = "Verify your Rocky OS email"
-            heading = "Verify your email"
             hours = int(get_email_verification_ttl().total_seconds() / 3600)
-            copy = f"Use this link within {hours} hours to finish setting up your Rocky workspace."
+            expiry = f"{hours} hour" if hours == 1 else f"{hours} hours"
+            kind = "verification"
         else:
             url = f"{get_public_app_url()}/reset-password?{query}"
             subject = "Reset your Rocky OS password"
-            heading = "Reset your password"
             minutes = int(get_password_reset_ttl().total_seconds() / 60)
-            copy = f"Use this link within {minutes} minutes to choose a new password. If you did not request this, you can ignore this email."
-        name = html.escape(user.full_name or "there")
-        safe_url = html.escape(url, quote=True)
+            if minutes % 60 == 0:
+                hours = minutes // 60
+                expiry = f"{hours} hour" if hours == 1 else f"{hours} hours"
+            else:
+                expiry = f"{minutes} minutes"
+            kind = "password_reset"
+        rendered = render_auth_email(
+            kind=kind,
+            name=user.full_name or "there",
+            action_url=url,
+            expiry=expiry,
+        )
         message = TransactionalEmail(
             recipient=user.email,
             subject=subject,
-            html=(
-                f"<h1>{heading}</h1><p>Hi {name},</p><p>{copy}</p>"
-                f'<p><a href="{safe_url}">Continue to Rocky OS</a></p>'
-            ),
+            html=rendered.html,
+            text=rendered.text,
             reply_to=SUPPORT_EMAIL,
         )
         try:

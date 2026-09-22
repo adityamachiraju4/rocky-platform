@@ -43,6 +43,7 @@ async def test_resend_sends_reply_to(monkeypatch: pytest.MonkeyPatch) -> None:
             recipient="user@example.com",
             subject="Test",
             html="<p>Test</p>",
+            text="Test",
             reply_to="support@rockyos.in",
         )
     )
@@ -55,4 +56,5 @@ async def test_resend_sends_reply_to(monkeypatch: pytest.MonkeyPatch) -> None:
         "subject": "Test",
         "html": "<p>Test</p>",
         "reply_to": "support@rockyos.in",
+        "text": "Test",
     }

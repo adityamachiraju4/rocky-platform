@@ -14,6 +14,7 @@ class TransactionalEmail:
     recipient: str
     subject: str
     html: str
+    text: str | None = None
     reply_to: str | None = None
 
 

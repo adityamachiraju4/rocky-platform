@@ -24,6 +24,8 @@ class ResendTransactionalEmailProvider:
         }
         if message.reply_to is not None:
             payload["reply_to"] = message.reply_to
+        if message.text is not None:
+            payload["text"] = message.text
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.post(
