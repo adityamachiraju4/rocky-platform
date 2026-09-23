@@ -1840,44 +1840,39 @@ function RockyInteraction({
       </div>}
 
       <div className="cc-command-tools">
-      <nav className="cc-quick-actions" aria-label="Command shortcuts">
-        <Link to="/projects"><span aria-hidden="true">□</span> Projects</Link>
-        {["Remind me to ", "What's next?"].map((text) => <button key={text} type="button" disabled={submitting || listening || micStarting} onClick={() => { setDraft(text); inputRef.current?.focus(); window.requestAnimationFrame(resizeComposer); }}><span aria-hidden="true">{text.startsWith("Remind") ? "◷" : "↗"}</span>{text.startsWith("Remind") ? "Remind me" : text}</button>)}
-      </nav>
-      <div className="rocky-options">
-        <label
-          className="rocky-audio-toggle"
-          title={spokenOutput ? "Spoken replies on" : "Spoken replies off"}
-          aria-label="Spoken replies"
-        >
-          <input
-            type="checkbox"
-            checked={spokenOutput}
-            onChange={(event) => {
-              spokenOutputRef.current = event.target.checked;
-              setSpokenOutput(event.target.checked);
-              try {
-                window.localStorage.setItem(SPOKEN_OUTPUT_KEY, String(event.target.checked));
-              } catch {
-                /* preference persistence is best-effort */
-              }
-              if (!event.target.checked) stopRockySpeech({ releasePlaybackContext: true });
-            }}
-          />
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
-            <path d="M16 9a4 4 0 0 1 0 6" />
-            <path d="M18.5 6.5a8 8 0 0 1 0 11" />
-          </svg>
-          <span>{spokenOutput ? "Audio on" : "Audio off"}</span>
-        </label>
-      </div>
-
-      <aside className="cc-live" aria-label="Live intelligence">
-        <div><span className="cc-overline">Live intelligence</span><p>Bring the world into context.</p></div>
-        <div className="cc-live-actions">{["What's the weather today?", "What's the latest news?"].map((text) => <button type="button" key={text} disabled={submitting || listening || micStarting} onClick={() => { setDraft(text); inputRef.current?.focus(); window.requestAnimationFrame(resizeComposer); }}>{text.includes("weather") ? "Local weather ↗" : "Latest news ↗"}</button>)}</div>
-        <small>Ask to check. Location is requested only when needed.</small>
-      </aside>
+        <nav className="cc-quick-actions" aria-label="Command shortcuts">
+          <Link to="/projects"><span aria-hidden="true">□</span> Projects</Link>
+          {["Remind me to ", "What's next?", "What's the weather today?", "What's the latest news?"].map((text) => <button key={text} type="button" disabled={submitting || listening || micStarting} onClick={() => { setDraft(text); inputRef.current?.focus(); window.requestAnimationFrame(resizeComposer); }}><span aria-hidden="true">{text.startsWith("Remind") ? "◷" : text.includes("weather") ? "⌁" : text.includes("news") ? "◌" : "↗"}</span>{text.startsWith("Remind") ? "Remind me" : text.includes("weather") ? "Local weather" : text.includes("news") ? "Latest news" : text}</button>)}
+        </nav>
+        <div className="rocky-options">
+          <label
+            className="rocky-audio-toggle"
+            title={spokenOutput ? "Spoken replies on" : "Spoken replies off"}
+            aria-label="Spoken replies"
+          >
+            <input
+              type="checkbox"
+              checked={spokenOutput}
+              onChange={(event) => {
+                spokenOutputRef.current = event.target.checked;
+                setSpokenOutput(event.target.checked);
+                try {
+                  window.localStorage.setItem(SPOKEN_OUTPUT_KEY, String(event.target.checked));
+                } catch {
+                  /* preference persistence is best-effort */
+                }
+                if (!event.target.checked) stopRockySpeech({ releasePlaybackContext: true });
+              }}
+            />
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M4 10v4h4l5 4V6l-5 4H4Z" />
+              <path d="M16 9a4 4 0 0 1 0 6" />
+              <path d="M18.5 6.5a8 8 0 0 1 0 11" />
+            </svg>
+            <span>{spokenOutput ? "Audio on" : "Audio off"}</span>
+          </label>
+        </div>
+        <small className="cc-location-note">Live answers use your location only when needed.</small>
       </div>
       {response && (
         <div className="rocky-latest" ref={latestResponseRef} aria-live="polite">

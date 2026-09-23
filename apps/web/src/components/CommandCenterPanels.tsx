@@ -12,8 +12,8 @@ function when(value: string) {
     month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
 }
-function Heading({ title, to }: { title: string; to?: string }) {
-  return <header className="cc-panel-heading"><h2>{title}</h2>{to && <Link to={to}>View all <span aria-hidden="true">↗</span></Link>}</header>;
+function Heading({ title, to, eyebrow }: { title: string; to?: string; eyebrow?: string }) {
+  return <header className="cc-panel-heading"><div>{eyebrow && <p className="cc-overline">{eyebrow}</p>}<h2>{title}</h2></div>{to && <Link to={to}>View all <span aria-hidden="true">→</span></Link>}</header>;
 }
 function Empty({ children }: { children: string }) {
   return <p className="cc-empty">{children}</p>;
@@ -46,32 +46,32 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
 
   return <div className="cc-dashboard">
     <section className="cc-panel cc-focus">
-      <Heading title="Current focus" />
-      <p className="cc-overline">Continue where you left off</p>
+      <Heading title="Continue" eyebrow="Pick up where you left off" />
       {data.errors.work ? <Empty>Projects and tasks are temporarily unavailable.</Empty> : focus ? <>
-        <span className="cc-focus-symbol" aria-hidden="true">↗</span>
-        <h3>{focus.projectName}</h3>
-        <p className="cc-focus-task">{focus.task.title}</p>
-        <p className="cc-meta">{recent ? `Last activity · ${when(recent.created_at)}` : "An open task to continue"}</p>
-        <Link className="cc-continue" to={`/projects/${focus.projectId}`}>Continue <span aria-hidden="true">→</span></Link>
-      </> : <><h3>Room for your next idea.</h3><Empty>Your next open task will appear here.</Empty><Link className="cc-continue" to="/projects">Explore projects <span aria-hidden="true">→</span></Link></>}
+        <div className="cc-focus-body">
+          <span className="cc-focus-symbol" aria-hidden="true">↗</span>
+          <div><p className="cc-meta">{focus.projectName}</p><h3>{focus.task.title}</h3><p className="cc-focus-context">{recent ? `Last touched ${when(recent.created_at)}` : "Ready for your next step"}</p></div>
+          <Link className="cc-continue" to={`/projects/${focus.projectId}`}>Continue <span aria-hidden="true">→</span></Link>
+        </div>
+      </> : <div className="cc-focus-empty"><span className="cc-focus-symbol" aria-hidden="true">✦</span><div><h3>Your attention is open.</h3><p>Start something new, or ask Rocky what is worth focusing on next.</p></div><Link className="cc-continue" to="/projects">Browse projects <span aria-hidden="true">→</span></Link></div>}
     </section>
 
     <section className="cc-panel cc-today">
-      <Heading title="Today" to="/reminders" />
-      <p className="cc-overline">A little perspective on your day</p>
-      <ol className="cc-timeline">
-        <li className="cc-time-complete"><span className="cc-time-node" /><h3>Completed</h3><p>{data.errors.activity ? "Activity unavailable" : completed.length ? `${completed.length} recent completion${completed.length === 1 ? "" : "s"}` : "No completions in recent activity"}</p><small>Today’s recent activity</small></li>
-        <li className="cc-time-current"><span className="cc-time-node" /><h3>Current</h3><p>{data.errors.reminders ? "Reminders unavailable" : due[0]?.title ?? "No overdue reminders"}</p><small>{!data.errors.reminders && due[0] ? when(due[0].due_at) : "What needs attention now"}</small></li>
-        <li><span className="cc-time-node" /><h3>Upcoming</h3><p>{data.errors.reminders ? "Reminders unavailable" : upcoming[0]?.title ?? "Nothing else scheduled today"}</p><small>{!data.errors.reminders && upcoming[0] ? when(upcoming[0].due_at) : "Later today"}</small></li>
-        <li><span className="cc-time-node" /><h3>Later</h3><p>{data.errors.reminders ? "Reminders unavailable" : later[0]?.title ?? "Space for what’s next"}</p><small>{!data.errors.reminders && later[0] ? when(later[0].due_at) : "Beyond today"}</small></li>
-      </ol>
-      {!data.errors.work && <Link className="cc-subtle-link" to="/tasks">{data.activeTasks.length} open tasks across your projects <span aria-hidden="true">↗</span></Link>}
+      <Heading title="Today" to="/tasks" eyebrow="A clear view of your day" />
+      <div className="cc-today-stats">
+        <Link to="/tasks"><strong>{data.errors.work ? "—" : data.activeTasks.length}</strong><span>Open tasks</span></Link>
+        <Link to="/reminders"><strong>{data.errors.reminders ? "—" : due.length}</strong><span>Due now</span></Link>
+        <Link to="/reminders"><strong>{data.errors.reminders ? "—" : upcoming.length}</strong><span>Coming up</span></Link>
+        <Link to="/activity"><strong>{data.errors.activity ? "—" : completed.length}</strong><span>Completed</span></Link>
+      </div>
+      <div className="cc-agenda">
+        <div><span className="cc-agenda-dot current" /><p><strong>Now</strong>{data.errors.reminders ? "Reminders unavailable" : due[0]?.title ?? "Nothing urgent needs your attention"}</p><small>{!data.errors.reminders && due[0] ? when(due[0].due_at) : "You’re clear"}</small></div>
+        <div><span className="cc-agenda-dot" /><p><strong>Next</strong>{data.errors.reminders ? "Reminders unavailable" : upcoming[0]?.title ?? later[0]?.title ?? "No upcoming reminders"}</p><small>{!data.errors.reminders && (upcoming[0] ?? later[0]) ? when((upcoming[0] ?? later[0]).due_at) : "Space for what matters"}</small></div>
+      </div>
     </section>
 
     <section className="cc-panel cc-noticed">
-      <Heading title="Rocky noticed" to="/notifications" />
-      <p className="cc-overline">From your workspace</p>
+      <Heading title="Rocky noticed" to="/notifications" eyebrow="Signals from your workspace" />
       <ul className="cc-observations">
         {!data.errors.reminders && reminders[0] && <li><span aria-hidden="true">◷</span><Link to="/reminders"><strong>{reminders[0].title}</strong><small>{due.includes(reminders[0]) ? "Due" : "Reminder"} · {when(reminders[0].due_at)}</small></Link></li>}
         {!data.errors.work && focus && <li><span aria-hidden="true">↗</span><Link to={`/projects/${focus.projectId}`}><strong>{focus.task.title}</strong><small>Still open in {focus.projectName}</small></Link></li>}
@@ -81,7 +81,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
     </section>
 
     <section className="cc-panel cc-projects">
-      <Heading title="Your projects" to="/projects" />
+      <Heading title="Projects" to="/projects" eyebrow="Work in motion" />
       {data.errors.work ? <Empty>Project details are temporarily unavailable.</Empty> : projects.length ? <div className="cc-project-list">{projects.map(({ project, activeTaskCount }) => {
         const next = data.activeTasks.find((item) => item.projectId === project.id);
         return <Link className="cc-project" key={project.id} to={`/projects/${project.id}`}>
@@ -93,7 +93,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
     </section>
 
     <section className="cc-panel cc-activity">
-      <Heading title="Recent activity" to="/activity" />
+      <Heading title="Recent activity" to="/activity" eyebrow="What changed" />
       {data.errors.activity ? <Empty>Recent activity is temporarily unavailable.</Empty> : data.recentActivity.length ? <ul className="cc-activity-list">{data.recentActivity.slice(0, 4).map((item) => {
         const ref = data.entityById.get(item.entity_id);
         const body = <><span className="cc-activity-dot" /><span><strong>{ref?.name ?? humanizeEvent(item.event_type)}</strong><small>{humanizeEvent(item.event_type)} · {when(item.created_at)}</small></span></>;
