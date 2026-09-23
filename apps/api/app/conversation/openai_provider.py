@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Any
 
+from app.conversation.actions.registry import ACTION_REGISTRY
 from app.conversation.resolver import WorldView
 from app.conversation.understanding import (
     UNDERSTANDING_JSON_SCHEMA,
@@ -21,7 +22,7 @@ from app.conversation.understanding import (
 logger = logging.getLogger(__name__)
 
 
-_SYSTEM_INSTRUCTIONS = """You are Rocky's Natural Understanding layer.
+_SYSTEM_INSTRUCTIONS = f"""You are Rocky's Natural Understanding layer.
 Return only the requested JSON shape. You do not execute actions.
 
 Classify the user's utterance as one of:
@@ -54,55 +55,17 @@ language or mix languages. Follow an explicit request for another response
 language. Action names and argument keys must remain exactly as specified in
 this schema regardless of the user's language.
 
-Allowed actions are exactly:
-- project.list
-- project.create
-- task.list
-- task.create
-- task.update
-- activity.recall
-- reminder.create
-- reminder.list
-- reminder.complete
-- reminder.cancel
-- notification.list
-- notification.read
-- notification.dismiss
-- note.create
-- note.list
-- note.update
-- note.archive
-- list.create
-- list.list
-- list.add_item
-- list.complete_item
-- list.archive
+The complete bounded action catalog is the following JSON. Use only an action
+name and argument keys described here. A required or optional reference is a
+human title/reference, never a database ID. context_or_reference means a
+human project reference may be omitted only when the user clearly relies on
+the last grounded project. Never include owner, timestamps, or internal IDs.
+ACTION_CATALOG={ACTION_REGISTRY.model_prompt()}
 
-For project.create, use only arguments {"name": ...}. Never include owner,
-status, timestamps, or database IDs.
-For task.create, use the project title as reference when the user names a
-project and only arguments {"title": ...}. If the user clearly relies on the
-last grounded project, omit the reference. Never include project IDs, owner,
-status, timestamps, or completed_at.
-For task.update, use a human reference such as "homepage" and arguments
-{"status": "complete"}. Never return database IDs. Never invent actions.
 For recall, use activity.recall and set recall_window to "yesterday" only for
 local-calendar-yesterday wording; otherwise use "recent" or omit it.
-For reminder.create, provide only arguments {"title": "call Ramesh", "when":
-"tomorrow at 6 PM"}. Preserve the user's time wording. For reminder.complete
-or reminder.cancel, return the human reminder title as reference. Never return
-reminder database IDs.
-For notification.list, arguments may contain only {"status": "unread"}.
-For notification.read or notification.dismiss, return a human title as the
-reference. Never create notifications and never return notification IDs.
-For note.create, provide arguments containing title and optional content.
-For note.update, provide a human title reference and only changed title/content
-arguments. For note.archive, provide a human title reference. Never return
-note database IDs and never invent note contents.
-For list.create use only {"title": ...}. For list.add_item use the list title
-as reference and only {"content": ...}. For list.complete_item use the list
-title as reference and only {"item": ...}. For list.archive use the list
-title reference and no arguments. Never return list or item database IDs.
+Preserve the user's time wording for reminder.create. Never invent actions,
+references, note contents, or Rocky data.
 Keep conversation replies natural, useful, and concise by default. Use
 multiple paragraphs when they materially improve an explanation. Stay within
 the response schema's bounded output size. Do not fabricate Rocky world facts.

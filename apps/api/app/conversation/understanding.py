@@ -152,7 +152,10 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
                 "unsupported",
             ],
         },
-        "action": {"type": ["string", "null"]},
+        "action": {
+            "type": ["string", "null"],
+            "enum": [*registry.ACTION_NAMES, None],
+        },
         "reference": {"type": ["string", "null"]},
         "arguments": {
             "type": ["object", "null"],
@@ -189,6 +192,7 @@ def safe_world_payload(world: WorldView) -> dict[str, Any]:
 
     return {
         "allowed_actions": list(registry.ACTION_NAMES),
+        "action_catalog": list(registry.model_catalog()),
         "projects": [
             {"name": p.name}
             for p in world.projects[:25]

@@ -60,6 +60,28 @@ from app.live.service import LiveIntelligenceService
 from app.live.intent import LiveIntent
 
 from app.conversation import registry
+from app.conversation.actions.base import (
+    ActionResult,
+    ExecutableAction,
+    ExecutorKey,
+    GroundedResultReference,
+    ReferencePolicy,
+)
+from app.conversation.actions.list import (
+    ListAddItemArgs,
+    ListCompleteItemArgs,
+    ListCreateArgs,
+)
+from app.conversation.actions.note import (
+    NoteCreateArgs,
+    NoteListArgs,
+    NoteUpdateArgs,
+)
+from app.conversation.actions.notification import NotificationListArgs
+from app.conversation.actions.project import ProjectCreateArgs
+from app.conversation.actions.reminder import ReminderCreateArgs
+from app.conversation.actions.runtime import validate_resolved_action
+from app.conversation.actions.task import TaskCreateArgs, TaskUpdateArgs
 from app.conversation.context import (
     ConversationContextStore,
     DurableReference,
@@ -184,24 +206,34 @@ def _with_location_context(
 def _target_type_for_action(
     action: str,
 ) -> str:
-    if action in {registry.PROJECT_LIST, registry.PROJECT_CREATE}:
-        return "project"
-    if action in {registry.TASK_LIST, registry.TASK_CREATE, registry.TASK_UPDATE}:
-        return "task"
-    if action in {registry.REMINDER_COMPLETE, registry.REMINDER_CANCEL}:
-        return "reminder"
-    if action in {registry.NOTIFICATION_READ, registry.NOTIFICATION_DISMISS}:
-        return "notification"
-    if action in {registry.NOTE_CREATE, registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
-        return "note"
-    if action in {
-        registry.LIST_CREATE,
-        registry.LIST_ADD_ITEM,
-        registry.LIST_COMPLETE_ITEM,
-        registry.LIST_ARCHIVE,
-    }:
-        return "list"
-    return "task"
+    definition = registry.definition(action)
+    return definition.reference_kind or action.partition(".")[0]
+
+
+ACTION_EXECUTOR_METHODS: dict[ExecutorKey, str] = {
+    ExecutorKey.PROJECT_LIST: "_execute_project_list",
+    ExecutorKey.PROJECT_CREATE: "_execute_project_create",
+    ExecutorKey.TASK_LIST: "_execute_task_list",
+    ExecutorKey.TASK_CREATE: "_execute_task_create",
+    ExecutorKey.TASK_UPDATE: "_execute_task_update",
+    ExecutorKey.ACTIVITY_RECALL: "_execute_activity_recall",
+    ExecutorKey.REMINDER_CREATE: "_execute_reminder_create",
+    ExecutorKey.REMINDER_LIST: "_execute_reminder_list",
+    ExecutorKey.REMINDER_COMPLETE: "_execute_reminder_complete",
+    ExecutorKey.REMINDER_CANCEL: "_execute_reminder_cancel",
+    ExecutorKey.NOTIFICATION_LIST: "_execute_notification_list",
+    ExecutorKey.NOTIFICATION_READ: "_execute_notification_read",
+    ExecutorKey.NOTIFICATION_DISMISS: "_execute_notification_dismiss",
+    ExecutorKey.NOTE_CREATE: "_execute_note_create",
+    ExecutorKey.NOTE_LIST: "_execute_note_list",
+    ExecutorKey.NOTE_UPDATE: "_execute_note_update",
+    ExecutorKey.NOTE_ARCHIVE: "_execute_note_archive",
+    ExecutorKey.LIST_CREATE: "_execute_list_create",
+    ExecutorKey.LIST_LIST: "_execute_list_list",
+    ExecutorKey.LIST_ADD_ITEM: "_execute_list_add_item",
+    ExecutorKey.LIST_COMPLETE_ITEM: "_execute_list_complete_item",
+    ExecutorKey.LIST_ARCHIVE: "_execute_list_archive",
+}
 
 
 class ConversationService:
@@ -731,399 +763,405 @@ class ConversationService:
         world: WorldView,
         timezone_name: str | None = None,
     ) -> Outcome:
-        if action.action == registry.PROJECT_LIST:
-            projects = await self._projects.list_projects(current_user)
-            return Outcome(
-                kind="project_list",
-                executed=True,
-                action=action.action,
-                project_names=tuple(p.name for p in projects),
-            )
+        result = await self._execute_action(
+            current_user, action, world, timezone_name
+        )
+        assert isinstance(result.outcome, Outcome)
+        return result.outcome
 
-        if action.action == registry.PROJECT_CREATE:
-            assert action.project_name is not None
-            project = await self._projects.create_project(
-                current_user,
-                ProjectCreate(name=action.project_name),
-            )
-            return Outcome(
-                kind="project_created",
-                executed=True,
-                action=action.action,
-                project_name=project.name,
-                reference_kind="project",
-                reference_id=project.id,
-                reference_label=project.name,
-            )
+    async def _execute_action(
+        self,
+        current_user: User,
+        action: ResolvedAction,
+        world: WorldView,
+        timezone_name: str | None = None,
+    ) -> ActionResult:
+        """Execute only through a registered definition and normalize facts."""
 
-        if action.action == registry.TASK_CREATE:
-            assert action.task_title is not None
-            project_id = action.project_id
-            project_name = action.project_name
-            if project_id is None:
-                try:
-                    project = self._resolve_context_project(
-                        current_user, world
-                    )
-                except CompletionTargetNotFoundError as exc:
-                    return Outcome(
-                        kind="target_not_found",
-                        executed=False,
-                        target=exc.target,
-                        target_type="project",
-                    )
-                except AmbiguousReferenceError as exc:
-                    return Outcome(
-                        kind="ambiguous",
-                        executed=False,
-                        candidates=tuple(exc.candidates),
-                    )
-                project_id = project.project_id
-                project_name = project.name
-            task = await self._tasks.create_task(
-                current_user,
-                project_id,
-                TaskCreate(title=action.task_title),
-            )
-            return Outcome(
-                kind="task_created",
-                executed=True,
-                action=action.action,
-                task_title=task.title,
-                project_name=project_name,
-                reference_kind="task",
-                reference_id=task.id,
-                reference_label=task.title,
-                reference_metadata={
-                    "project_id": str(project_id),
-                    "project": project_name or "",
-                },
-            )
-
-        if action.action == registry.TASK_LIST:
-            if action.project_id is None:
-                active_refs = [
-                    t for t in world.tasks if t.status == "active"
-                ]
-                return Outcome(
-                    kind="task_list",
-                    executed=True,
-                    action=action.action,
-                    task_scope="all",
-                    task_total=len(world.tasks),
-                    task_active=len(active_refs),
-                    task_titles=tuple(t.title for t in active_refs[:5]),
-                    latest_completed_task_title=(
-                        await self._latest_completed_task_title(
-                            current_user, world
-                        )
-                    ),
-                )
-
-            tasks = await self._tasks.list_tasks(
-                current_user, action.project_id
-            )
-            active = [t for t in tasks if t.status == "active"]
-            return Outcome(
-                kind="task_list",
-                executed=True,
-                action=action.action,
-                task_scope="project",
-                task_total=len(tasks),
-                task_active=len(active),
-                task_titles=tuple(t.title for t in active[:5]),
-            )
-
-        if action.action == registry.TASK_UPDATE:
-            assert action.project_id is not None
-            assert action.task_id is not None
-            task = await self._tasks.update_task(
-                current_user,
-                action.project_id,
-                action.task_id,
-                TaskUpdate(status=action.status),
-            )
-            return Outcome(
-                kind="task_updated",
-                executed=True,
-                action=action.action,
-                task_title=task.title,
-                task_status=task.status,
-                project_name=next(
-                    (
-                        t.project_name
-                        for t in world.tasks
-                        if t.task_id == task.id
-                    ),
-                    None,
+        executable = validate_resolved_action(action)
+        try:
+            executor_name = ACTION_EXECUTOR_METHODS[executable.definition.executor]
+        except KeyError as exc:  # pragma: no cover - closed-registry guard
+            raise UnknownActionError(action.action) from exc
+        executor = getattr(self, executor_name)
+        outcome = await executor(
+            current_user, executable, world, timezone_name
+        )
+        references: tuple[GroundedResultReference, ...] = ()
+        entity_ids: tuple[uuid.UUID, ...] = ()
+        if outcome.reference_kind and outcome.reference_label:
+            references = (
+                GroundedResultReference(
+                    kind=outcome.reference_kind,
+                    entity_id=outcome.reference_id,
+                    display_text=outcome.reference_label,
+                    metadata=outcome.reference_metadata or {},
                 ),
-                reference_kind="task",
-                reference_id=task.id,
-                reference_label=task.title,
-                reference_metadata={"project_id": str(action.project_id)},
             )
+            if outcome.reference_id is not None:
+                entity_ids = (outcome.reference_id,)
+        return ActionResult(
+            success=outcome.executed,
+            action=executable.definition.name,
+            display_summary=(
+                outcome.reply
+                or ": ".join(
+                    value for value in (
+                        outcome.kind.replace("_", " "),
+                        outcome.reference_label,
+                    ) if value
+                )
+            ),
+            payload={"kind": outcome.kind, "executed": outcome.executed},
+            entity_ids=entity_ids,
+            references=references,
+            failure_type=None if outcome.executed else outcome.kind,
+            outcome=outcome,
+        )
 
-        if action.action == registry.ACTIVITY_RECALL:
-            activities = await self._activity.list_activities(current_user)
-            if action.recall_window == "yesterday":
-                selected = self._window_yesterday(activities, timezone_name)
-                recall_window = "yesterday"
-            else:
-                selected = self._window_recent(activities)
-                recall_window = "recent"
-            facts = self._recall_facts(selected, world)
-            return Outcome(
-                kind="activity_recall",
-                executed=True,
-                action=action.action,
-                recall_facts=facts,
-                recall_window=recall_window,
-            )
+    async def _execute_project_list(self, user: User, action: ExecutableAction,
+                                    world: WorldView, timezone_name: str | None) -> Outcome:
+        projects = await self._projects.list_projects(user)
+        return Outcome(kind="project_list", executed=True, action=action.definition.name,
+                       project_names=tuple(project.name for project in projects))
 
-        if action.action == registry.REMINDER_CREATE:
-            assert action.reminder_title is not None
-            assert action.reminder_when is not None
+    async def _execute_project_create(self, user: User, action: ExecutableAction,
+                                      world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, ProjectCreateArgs)
+        project = await self._projects.create_project(
+            user, ProjectCreate(name=action.arguments.name)
+        )
+        return Outcome(kind="project_created", executed=True,
+                       action=action.definition.name, project_name=project.name,
+                       reference_kind="project", reference_id=project.id,
+                       reference_label=project.name)
+
+    async def _execute_task_create(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, TaskCreateArgs)
+        project_id = action.grounding.project_id
+        project_name = action.grounding.project_name
+        if project_id is None:
             try:
-                timezone_key = resolve_timezone(
-                    timezone_name or current_user.timezone
-                ).key
-                due_at = interpret_reminder_time(
-                    action.reminder_when, timezone_key, self._clock
-                )
-            except (TimeError, ValueError) as exc:
-                return Outcome(
-                    kind="unsupported",
-                    executed=False,
-                    reply=str(exc),
-                )
-            reminder = await self._reminders.create_reminder(
-                current_user,
-                ReminderCreate(
-                    title=action.reminder_title,
-                    due_at=due_at,
-                    timezone=timezone_key,
+                project = self._resolve_context_project(user, world)
+            except CompletionTargetNotFoundError as exc:
+                return Outcome(kind="target_not_found", executed=False,
+                               target=exc.target, target_type="project")
+            except AmbiguousReferenceError as exc:
+                return Outcome(kind="ambiguous", executed=False,
+                               candidates=tuple(exc.candidates))
+            project_id, project_name = project.project_id, project.name
+        task = await self._tasks.create_task(
+            user, project_id, TaskCreate(title=action.arguments.title)
+        )
+        return Outcome(
+            kind="task_created", executed=True, action=action.definition.name,
+            task_title=task.title, project_name=project_name,
+            reference_kind="task", reference_id=task.id,
+            reference_label=task.title,
+            reference_metadata={"project_id": str(project_id),
+                                "project": project_name or ""},
+        )
+
+    async def _execute_task_list(self, user: User, action: ExecutableAction,
+                                 world: WorldView, timezone_name: str | None) -> Outcome:
+        project_id = action.grounding.project_id
+        if project_id is None:
+            active = [task for task in world.tasks if task.status == "active"]
+            return Outcome(
+                kind="task_list", executed=True, action=action.definition.name,
+                task_scope="all", task_total=len(world.tasks),
+                task_active=len(active),
+                task_titles=tuple(task.title for task in active[:5]),
+                latest_completed_task_title=(
+                    await self._latest_completed_task_title(user, world)
                 ),
             )
-            return Outcome(
-                kind="reminder_created",
-                executed=True,
-                action=action.action,
-                reminder_title=reminder.title,
-                reminder_due_at=reminder.due_at,
-                reminder_timezone=reminder.timezone,
-                reference_kind="reminder",
-                reference_id=reminder.id,
-                reference_label=reminder.title,
-            )
+        tasks = await self._tasks.list_tasks(user, project_id)
+        active = [task for task in tasks if task.status == "active"]
+        return Outcome(kind="task_list", executed=True,
+                       action=action.definition.name, task_scope="project",
+                       task_total=len(tasks), task_active=len(active),
+                       task_titles=tuple(task.title for task in active[:5]))
 
-        if action.action == registry.REMINDER_LIST:
-            reminders = await self._reminders.list_reminders(current_user)
-            open_reminders = [
-                reminder
-                for reminder in reminders
-                if reminder.status in {"scheduled", "due"}
-            ]
-            return Outcome(
-                kind="reminder_list",
-                executed=True,
-                action=action.action,
-                reminders=tuple(
-                    (
-                        reminder.title,
-                        reminder.due_at,
-                        reminder.timezone,
-                        reminder.status,
-                    )
-                    for reminder in open_reminders
-                ),
-                reference_kind="reminder" if len(open_reminders) == 1 else None,
-                reference_id=open_reminders[0].id if len(open_reminders) == 1 else None,
-                reference_label=(
-                    open_reminders[0].title if len(open_reminders) == 1 else None
-                ),
-            )
+    async def _execute_task_update(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, TaskUpdateArgs)
+        assert action.grounding.project_id is not None
+        assert action.grounding.task_id is not None
+        task = await self._tasks.update_task(
+            user, action.grounding.project_id, action.grounding.task_id,
+            TaskUpdate(status=action.arguments.status),
+        )
+        return Outcome(
+            kind="task_updated", executed=True, action=action.definition.name,
+            task_title=task.title, task_status=task.status,
+            project_name=next((item.project_name for item in world.tasks
+                               if item.task_id == task.id), None),
+            reference_kind="task", reference_id=task.id,
+            reference_label=task.title,
+            reference_metadata={"project_id": str(action.grounding.project_id)},
+        )
 
-        if action.action in {
-            registry.REMINDER_COMPLETE,
-            registry.REMINDER_CANCEL,
-        }:
-            assert action.reminder_id is not None
-            if action.action == registry.REMINDER_COMPLETE:
-                reminder = await self._reminders.complete_reminder(
-                    current_user, action.reminder_id
-                )
-            else:
-                reminder = await self._reminders.cancel_reminder(
-                    current_user, action.reminder_id
-                )
-            return Outcome(
-                kind="reminder_updated",
-                executed=True,
-                action=action.action,
-                reminder_title=reminder.title,
-                reminder_status=reminder.status,
-                reference_kind="reminder",
-                reference_id=reminder.id,
-                reference_label=reminder.title,
-            )
+    async def _execute_activity_recall(self, user: User, action: ExecutableAction,
+                                       world: WorldView, timezone_name: str | None) -> Outcome:
+        activities = await self._activity.list_activities(user)
+        if action.grounding.recall_window == "yesterday":
+            selected = self._window_yesterday(activities, timezone_name)
+            window = "yesterday"
+        else:
+            selected = self._window_recent(activities)
+            window = "recent"
+        return Outcome(kind="activity_recall", executed=True,
+                       action=action.definition.name,
+                       recall_facts=self._recall_facts(selected, world),
+                       recall_window=window)
 
-        if action.action == registry.NOTIFICATION_LIST:
-            notifications = await self._notifications.list_notifications(
-                current_user, status=action.notification_status
+    async def _execute_reminder_create(self, user: User, action: ExecutableAction,
+                                       world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, ReminderCreateArgs)
+        try:
+            timezone_key = resolve_timezone(timezone_name or user.timezone).key
+            due_at = interpret_reminder_time(
+                action.arguments.when, timezone_key, self._clock
             )
-            visible = [item for item in notifications if item.status != "dismissed"]
-            return Outcome(
-                kind="notification_list",
-                executed=True,
-                action=action.action,
-                notifications=tuple(
-                    (item.title, item.body, item.status) for item in visible
-                ),
-                reference_kind="notification" if len(visible) == 1 else None,
-                reference_id=visible[0].id if len(visible) == 1 else None,
-                reference_label=visible[0].title if len(visible) == 1 else None,
-            )
+        except (TimeError, ValueError) as exc:
+            return Outcome(kind="unsupported", executed=False, reply=str(exc))
+        reminder = await self._reminders.create_reminder(
+            user, ReminderCreate(title=action.arguments.title, due_at=due_at,
+                                 timezone=timezone_key)
+        )
+        return Outcome(kind="reminder_created", executed=True,
+                       action=action.definition.name,
+                       reminder_title=reminder.title,
+                       reminder_due_at=reminder.due_at,
+                       reminder_timezone=reminder.timezone,
+                       reference_kind="reminder", reference_id=reminder.id,
+                       reference_label=reminder.title)
 
-        if action.action in {
-            registry.NOTIFICATION_READ,
-            registry.NOTIFICATION_DISMISS,
-        }:
-            assert action.notification_id is not None
-            if action.action == registry.NOTIFICATION_READ:
-                notification = await self._notifications.mark_read(
-                    current_user, action.notification_id
-                )
-            else:
-                notification = await self._notifications.dismiss(
-                    current_user, action.notification_id
-                )
-            return Outcome(
-                kind="notification_updated",
-                executed=True,
-                action=action.action,
-                notification_title=notification.title,
-                notification_status=notification.status,
-                reference_kind="notification",
-                reference_id=notification.id,
-                reference_label=notification.title,
-            )
+    async def _execute_reminder_list(self, user: User, action: ExecutableAction,
+                                     world: WorldView, timezone_name: str | None) -> Outcome:
+        reminders = await self._reminders.list_reminders(user)
+        open_reminders = [item for item in reminders
+                          if item.status in {"scheduled", "due"}]
+        single = open_reminders[0] if len(open_reminders) == 1 else None
+        return Outcome(
+            kind="reminder_list", executed=True, action=action.definition.name,
+            reminders=tuple((item.title, item.due_at, item.timezone, item.status)
+                            for item in open_reminders),
+            reference_kind="reminder" if single else None,
+            reference_id=single.id if single else None,
+            reference_label=single.title if single else None,
+        )
 
-        if action.action == registry.NOTE_CREATE:
-            assert action.note_title is not None
-            note = await self._notes.create_note(
-                current_user,
-                NoteCreate(
-                    title=action.note_title,
-                    content=action.note_content or "",
-                ),
-            )
-            return Outcome(
-                kind="note_created",
-                executed=True,
-                action=action.action,
-                note_title=note.title,
-                reference_kind="note",
-                reference_id=note.id,
-                reference_label=note.title,
-            )
+    async def _execute_reminder_complete(self, user: User, action: ExecutableAction,
+                                         world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.reminder_id is not None
+        reminder = await self._reminders.complete_reminder(
+            user, action.grounding.reminder_id
+        )
+        return self._reminder_update_outcome(action, reminder)
 
-        if action.action == registry.NOTE_LIST:
-            note_status = action.note_status or "active"
-            notes = await self._notes.list_notes(
-                current_user, status=note_status
-            )
-            return Outcome(
-                kind="note_list",
-                executed=True,
-                action=action.action,
-                note_status=note_status,
-                notes=tuple((note.title, note.content) for note in notes),
-                reference_kind="note" if len(notes) == 1 else None,
-                reference_id=notes[0].id if len(notes) == 1 else None,
-                reference_label=notes[0].title if len(notes) == 1 else None,
-            )
+    async def _execute_reminder_cancel(self, user: User, action: ExecutableAction,
+                                       world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.reminder_id is not None
+        reminder = await self._reminders.cancel_reminder(
+            user, action.grounding.reminder_id
+        )
+        return self._reminder_update_outcome(action, reminder)
 
-        if action.action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
-            assert action.note_id is not None
-            data = (
-                NoteUpdate(status="archived")
-                if action.action == registry.NOTE_ARCHIVE
-                else NoteUpdate.model_validate(
-                    {
-                        key: value
-                        for key, value in {
-                            "title": action.note_title,
-                            "content": action.note_content,
-                        }.items()
-                        if value is not None
-                    }
-                )
-            )
-            note = await self._notes.update_note(
-                current_user, action.note_id, data
-            )
-            return Outcome(
-                kind="note_updated",
-                executed=True,
-                action=action.action,
-                note_title=note.title,
-                note_status=note.status,
-                reference_kind="note",
-                reference_id=note.id,
-                reference_label=note.title,
-            )
+    @staticmethod
+    def _reminder_update_outcome(action: ExecutableAction, reminder: object) -> Outcome:
+        return Outcome(kind="reminder_updated", executed=True,
+                       action=action.definition.name,
+                       reminder_title=reminder.title,
+                       reminder_status=reminder.status,
+                       reference_kind="reminder", reference_id=reminder.id,
+                       reference_label=reminder.title)
 
-        if action.action == registry.LIST_CREATE:
-            assert action.list_title is not None
-            value = await self._lists.create_list(
-                current_user, ListCreate(title=action.list_title)
-            )
-            return Outcome(kind="list_created", executed=True, action=action.action,
-                           list_title=value.title, reference_kind="list",
-                           reference_id=value.id, reference_label=value.title)
-        if action.action == registry.LIST_LIST:
-            values = await self._lists.list_lists(current_user)
-            return Outcome(kind="list_list", executed=True, action=action.action,
-                           list_titles=tuple(value.title for value in values),
-                           reference_kind="list" if len(values) == 1 else None,
-                           reference_id=values[0].id if len(values) == 1 else None,
-                           reference_label=values[0].title if len(values) == 1 else None)
-        if action.action == registry.LIST_ADD_ITEM:
-            assert action.list_id is not None and action.list_item_content is not None
-            item = await self._lists.create_item(
-                current_user, action.list_id,
-                ListItemCreate(content=action.list_item_content),
-            )
-            return Outcome(kind="list_item_added", executed=True, action=action.action,
-                           list_title=action.list_title, list_item_content=item.content,
-                           reference_kind="list", reference_id=action.list_id,
-                           reference_label=action.list_title)
-        if action.action == registry.LIST_COMPLETE_ITEM:
-            assert action.list_id is not None and action.list_item_id is not None
-            item = await self._lists.update_item(
-                current_user, action.list_id, action.list_item_id,
-                ListItemUpdate(status="complete"),
-            )
-            return Outcome(kind="list_item_completed", executed=True, action=action.action,
-                           list_title=action.list_title, list_item_content=item.content,
-                           reference_kind="list", reference_id=action.list_id,
-                           reference_label=action.list_title)
-        if action.action == registry.LIST_ARCHIVE:
-            assert action.list_id is not None
-            value = await self._lists.update_list(
-                current_user, action.list_id, ListUpdate(status="archived")
-            )
-            return Outcome(kind="list_archived", executed=True, action=action.action,
-                           list_title=value.title, reference_kind="list",
-                           reference_id=value.id, reference_label=value.title)
+    async def _execute_notification_list(self, user: User, action: ExecutableAction,
+                                         world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, NotificationListArgs)
+        values = await self._notifications.list_notifications(
+            user, status=action.arguments.status
+        )
+        visible = [item for item in values if item.status != "dismissed"]
+        single = visible[0] if len(visible) == 1 else None
+        return Outcome(
+            kind="notification_list", executed=True, action=action.definition.name,
+            notifications=tuple((item.title, item.body, item.status)
+                                for item in visible),
+            reference_kind="notification" if single else None,
+            reference_id=single.id if single else None,
+            reference_label=single.title if single else None,
+        )
 
-        # Registry membership was checked upstream; reaching here is a bug.
-        raise UnknownActionError(action.action)
+    async def _execute_notification_read(self, user: User, action: ExecutableAction,
+                                         world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.notification_id is not None
+        value = await self._notifications.mark_read(
+            user, action.grounding.notification_id
+        )
+        return self._notification_update_outcome(action, value)
+
+    async def _execute_notification_dismiss(self, user: User, action: ExecutableAction,
+                                            world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.notification_id is not None
+        value = await self._notifications.dismiss(
+            user, action.grounding.notification_id
+        )
+        return self._notification_update_outcome(action, value)
+
+    @staticmethod
+    def _notification_update_outcome(action: ExecutableAction, value: object) -> Outcome:
+        return Outcome(kind="notification_updated", executed=True,
+                       action=action.definition.name,
+                       notification_title=value.title,
+                       notification_status=value.status,
+                       reference_kind="notification", reference_id=value.id,
+                       reference_label=value.title)
+
+    async def _execute_note_create(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, NoteCreateArgs)
+        note = await self._notes.create_note(
+            user, NoteCreate(title=action.arguments.title,
+                             content=action.arguments.content)
+        )
+        return Outcome(kind="note_created", executed=True,
+                       action=action.definition.name, note_title=note.title,
+                       reference_kind="note", reference_id=note.id,
+                       reference_label=note.title)
+
+    async def _execute_note_list(self, user: User, action: ExecutableAction,
+                                 world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, NoteListArgs)
+        status = action.arguments.status or "active"
+        notes = await self._notes.list_notes(user, status=status)
+        single = notes[0] if len(notes) == 1 else None
+        return Outcome(kind="note_list", executed=True,
+                       action=action.definition.name, note_status=status,
+                       notes=tuple((note.title, note.content) for note in notes),
+                       reference_kind="note" if single else None,
+                       reference_id=single.id if single else None,
+                       reference_label=single.title if single else None)
+
+    async def _execute_note_update(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, NoteUpdateArgs)
+        assert action.grounding.note_id is not None
+        note = await self._notes.update_note(
+            user, action.grounding.note_id,
+            NoteUpdate.model_validate(action.arguments.model_dump(exclude_none=True)),
+        )
+        return self._note_update_outcome(action, note)
+
+    async def _execute_note_archive(self, user: User, action: ExecutableAction,
+                                    world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.note_id is not None
+        note = await self._notes.update_note(
+            user, action.grounding.note_id, NoteUpdate(status="archived")
+        )
+        return self._note_update_outcome(action, note)
+
+    @staticmethod
+    def _note_update_outcome(action: ExecutableAction, note: object) -> Outcome:
+        return Outcome(kind="note_updated", executed=True,
+                       action=action.definition.name, note_title=note.title,
+                       note_status=note.status, reference_kind="note",
+                       reference_id=note.id, reference_label=note.title)
+
+    async def _execute_list_create(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, ListCreateArgs)
+        value = await self._lists.create_list(
+            user, ListCreate(title=action.arguments.title)
+        )
+        return Outcome(kind="list_created", executed=True,
+                       action=action.definition.name, list_title=value.title,
+                       reference_kind="list", reference_id=value.id,
+                       reference_label=value.title)
+
+    async def _execute_list_list(self, user: User, action: ExecutableAction,
+                                 world: WorldView, timezone_name: str | None) -> Outcome:
+        values = await self._lists.list_lists(user)
+        single = values[0] if len(values) == 1 else None
+        return Outcome(kind="list_list", executed=True,
+                       action=action.definition.name,
+                       list_titles=tuple(value.title for value in values),
+                       reference_kind="list" if single else None,
+                       reference_id=single.id if single else None,
+                       reference_label=single.title if single else None)
+
+    async def _execute_list_add_item(self, user: User, action: ExecutableAction,
+                                     world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, ListAddItemArgs)
+        assert action.grounding.list_id is not None
+        item = await self._lists.create_item(
+            user, action.grounding.list_id,
+            ListItemCreate(content=action.arguments.content),
+        )
+        return Outcome(kind="list_item_added", executed=True,
+                       action=action.definition.name,
+                       list_title=action.grounding.list_title,
+                       list_item_content=item.content, reference_kind="list",
+                       reference_id=action.grounding.list_id,
+                       reference_label=action.grounding.list_title)
+
+    async def _execute_list_complete_item(self, user: User, action: ExecutableAction,
+                                          world: WorldView, timezone_name: str | None) -> Outcome:
+        assert isinstance(action.arguments, ListCompleteItemArgs)
+        assert action.grounding.list_id is not None
+        assert action.grounding.list_item_id is not None
+        item = await self._lists.update_item(
+            user, action.grounding.list_id, action.grounding.list_item_id,
+            ListItemUpdate(status="complete"),
+        )
+        return Outcome(kind="list_item_completed", executed=True,
+                       action=action.definition.name,
+                       list_title=action.grounding.list_title,
+                       list_item_content=item.content, reference_kind="list",
+                       reference_id=action.grounding.list_id,
+                       reference_label=action.grounding.list_title)
+
+    async def _execute_list_archive(self, user: User, action: ExecutableAction,
+                                    world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.list_id is not None
+        value = await self._lists.update_list(
+            user, action.grounding.list_id, ListUpdate(status="archived")
+        )
+        return Outcome(kind="list_archived", executed=True,
+                       action=action.definition.name, list_title=value.title,
+                       reference_kind="list", reference_id=value.id,
+                       reference_label=value.title)
 
     def _resolved_action_from_proposal(
         self, proposal: ActionProposal, world: WorldView
     ) -> ResolvedAction:
-        arguments = proposal.arguments or {}
+        definition = registry.definition(proposal.action)
+        if definition.grounder.value != proposal.action.partition(".")[0]:
+            raise UnknownActionError(proposal.action)
+        if (
+            definition.reference is ReferencePolicy.NONE
+            and proposal.reference is not None
+        ):
+            raise CompletionTargetNotFoundError(proposal.reference)
+        if (
+            definition.reference is ReferencePolicy.REQUIRED
+            and not (proposal.reference or "").strip()
+        ):
+            raise CompletionTargetNotFoundError(
+                f"that {definition.reference_kind or 'action'}"
+            )
+        try:
+            typed_arguments = registry.parse_arguments(
+                proposal.action, proposal.arguments
+            )
+        except registry.ActionArgumentsError as exc:
+            raise CompletionTargetNotFoundError(
+                proposal.reference or "that action"
+            ) from exc
+        arguments = typed_arguments.model_dump(exclude_none=True)
         if (
             proposal.action != registry.ACTIVITY_RECALL
             and proposal.recall_window is not None
@@ -1131,10 +1169,6 @@ class ConversationService:
             raise CompletionTargetNotFoundError("that action")
 
         if proposal.action == registry.TASK_UPDATE:
-            if set(arguments) != {"status"} or arguments.get("status") != "complete":
-                raise CompletionTargetNotFoundError(
-                    proposal.reference or "that task"
-                )
             task = self._resolve_task_reference(
                 proposal.reference, world, require_active=True
             )
@@ -1146,7 +1180,7 @@ class ConversationService:
             )
 
         if proposal.action == registry.ACTIVITY_RECALL:
-            if arguments or proposal.reference:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("activity recall")
             return ResolvedAction(
                 action=registry.ACTIVITY_RECALL,
@@ -1154,27 +1188,21 @@ class ConversationService:
             )
 
         if proposal.action == registry.PROJECT_LIST:
-            if arguments or proposal.reference:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("projects")
             return ResolvedAction(action=registry.PROJECT_LIST)
 
         if proposal.action == registry.PROJECT_CREATE:
-            if proposal.reference or set(arguments) != {"name"}:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("that project")
             name = arguments.get("name")
-            if not name:
-                raise CompletionTargetNotFoundError("that project")
             return ResolvedAction(
                 action=registry.PROJECT_CREATE,
                 project_name=name,
             )
 
         if proposal.action == registry.TASK_CREATE:
-            if set(arguments) != {"title"}:
-                raise CompletionTargetNotFoundError("that task")
             title = arguments.get("title")
-            if not title:
-                raise CompletionTargetNotFoundError("that task")
             if proposal.reference:
                 project = self._resolve_project_reference(
                     proposal.reference, world
@@ -1191,8 +1219,6 @@ class ConversationService:
             )
 
         if proposal.action == registry.TASK_LIST:
-            if arguments:
-                raise CompletionTargetNotFoundError("tasks")
             if not proposal.reference:
                 return ResolvedAction(action=registry.TASK_LIST)
             project = self._resolve_project_reference(
@@ -1204,12 +1230,10 @@ class ConversationService:
             )
 
         if proposal.action == registry.REMINDER_CREATE:
-            if proposal.reference or set(arguments) != {"title", "when"}:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("that reminder")
             title = arguments.get("title")
             when = arguments.get("when")
-            if not title or not when:
-                raise CompletionTargetNotFoundError("that reminder")
             return ResolvedAction(
                 action=registry.REMINDER_CREATE,
                 reminder_title=title,
@@ -1217,7 +1241,7 @@ class ConversationService:
             )
 
         if proposal.action == registry.REMINDER_LIST:
-            if arguments or proposal.reference:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("reminders")
             return ResolvedAction(action=registry.REMINDER_LIST)
 
@@ -1225,10 +1249,6 @@ class ConversationService:
             registry.REMINDER_COMPLETE,
             registry.REMINDER_CANCEL,
         }:
-            if arguments:
-                raise CompletionTargetNotFoundError(
-                    proposal.reference or "that reminder"
-                )
             reminder = self._resolve_reminder_reference(
                 proposal.reference, world
             )
@@ -1239,11 +1259,9 @@ class ConversationService:
             )
 
         if proposal.action == registry.NOTIFICATION_LIST:
-            if proposal.reference or set(arguments) - {"status"}:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("notifications")
             status = arguments.get("status")
-            if status not in {None, "unread"}:
-                raise CompletionTargetNotFoundError("notifications")
             return ResolvedAction(
                 action=registry.NOTIFICATION_LIST,
                 notification_status="unread" if status == "unread" else None,
@@ -1253,10 +1271,6 @@ class ConversationService:
             registry.NOTIFICATION_READ,
             registry.NOTIFICATION_DISMISS,
         }:
-            if arguments:
-                raise CompletionTargetNotFoundError(
-                    proposal.reference or "that notification"
-                )
             notification = self._resolve_notification_reference(
                 proposal.reference, world
             )
@@ -1266,11 +1280,9 @@ class ConversationService:
             )
 
         if proposal.action == registry.NOTE_CREATE:
-            if proposal.reference or set(arguments) - {"title", "content"}:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("that note")
             title = arguments.get("title")
-            if not title:
-                raise CompletionTargetNotFoundError("that note")
             return ResolvedAction(
                 action=registry.NOTE_CREATE,
                 note_title=title,
@@ -1278,11 +1290,9 @@ class ConversationService:
             )
 
         if proposal.action == registry.NOTE_LIST:
-            if proposal.reference or set(arguments) - {"status"}:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("notes")
             status = arguments.get("status")
-            if status not in {None, "active", "archived"}:
-                raise CompletionTargetNotFoundError("notes")
             return ResolvedAction(
                 action=registry.NOTE_LIST,
                 note_status="archived" if status == "archived" else "active",
@@ -1290,17 +1300,6 @@ class ConversationService:
 
         if proposal.action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
             note = self._resolve_note_reference(proposal.reference, world)
-            allowed_arguments = (
-                {"title", "content"}
-                if proposal.action == registry.NOTE_UPDATE
-                else set()
-            )
-            if set(arguments) - allowed_arguments:
-                raise CompletionTargetNotFoundError(note.title)
-            if proposal.action == registry.NOTE_UPDATE and not (
-                arguments.get("content") or arguments.get("title")
-            ):
-                raise CompletionTargetNotFoundError(note.title)
             return ResolvedAction(
                 action=proposal.action,
                 note_id=note.note_id,
@@ -1309,28 +1308,22 @@ class ConversationService:
             )
 
         if proposal.action == registry.LIST_CREATE:
-            if proposal.reference or set(arguments) != {"title"} or not arguments.get("title"):
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("that list")
             return ResolvedAction(action=proposal.action, list_title=arguments["title"])
         if proposal.action == registry.LIST_LIST:
-            if arguments or proposal.reference:
+            if proposal.reference:
                 raise CompletionTargetNotFoundError("lists")
             return ResolvedAction(action=proposal.action)
         if proposal.action in {registry.LIST_ADD_ITEM, registry.LIST_ARCHIVE}:
             value = self._resolve_list_reference(proposal.reference, world)
             if proposal.action == registry.LIST_ADD_ITEM:
-                if set(arguments) != {"content"} or not arguments.get("content"):
-                    raise CompletionTargetNotFoundError(value.title)
                 content = arguments["content"]
             else:
-                if arguments:
-                    raise CompletionTargetNotFoundError(value.title)
                 content = None
             return ResolvedAction(action=proposal.action, list_id=value.list_id,
                                   list_title=value.title, list_item_content=content)
         if proposal.action == registry.LIST_COMPLETE_ITEM:
-            if set(arguments) != {"item"} or not arguments.get("item"):
-                raise CompletionTargetNotFoundError("that list item")
             value = self._resolve_list_reference(proposal.reference, world)
             item = self._resolve_list_item_reference(arguments["item"], value)
             return ResolvedAction(action=proposal.action, list_id=value.list_id,
@@ -1538,21 +1531,7 @@ class ConversationService:
 
     @staticmethod
     def _action_requires_world(action: str) -> bool:
-        return action in {
-            registry.TASK_LIST,
-            registry.TASK_CREATE,
-            registry.TASK_UPDATE,
-            registry.ACTIVITY_RECALL,
-            registry.REMINDER_COMPLETE,
-            registry.REMINDER_CANCEL,
-            registry.NOTIFICATION_READ,
-            registry.NOTIFICATION_DISMISS,
-            registry.NOTE_UPDATE,
-            registry.NOTE_ARCHIVE,
-            registry.LIST_ADD_ITEM,
-            registry.LIST_COMPLETE_ITEM,
-            registry.LIST_ARCHIVE,
-        }
+        return registry.definition(action).requires_world
 
     @staticmethod
     def _live_information_category(message: str) -> str | None:

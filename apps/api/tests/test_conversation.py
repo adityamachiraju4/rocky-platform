@@ -24,6 +24,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, time, timedelta, timezone
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -56,6 +57,7 @@ from app.conversation.context import (
 import app.models  # noqa: F401  (populate Base.metadata before create_all)
 
 from app.conversation import registry
+from app.conversation.actions.registry import ActionArgumentsError
 from app.conversation.service import ConversationService
 from app.conversation.exceptions import UnknownActionError
 from app.conversation.dependencies import get_understanding_provider
@@ -1094,6 +1096,32 @@ async def test_provider_task_create_rejects_extra_arguments(ctx) -> None:
     assert response.json()["executed"] is False
     tasks = await client.get(f"/projects/{project_id}/tasks", headers=headers)
     assert tasks.json() == []
+
+
+@pytest.mark.parametrize("arguments", [{}, {"name": 42}])
+@pytest.mark.asyncio
+async def test_provider_project_create_rejects_missing_or_wrong_typed_arguments(
+    ctx, arguments: dict[str, object]
+) -> None:
+    _use_fake_provider(
+        ActionProposal(
+            kind="action",
+            action="project.create",
+            arguments=arguments,  # type: ignore[arg-type] - hostile provider payload
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Create a project"},
+        headers=headers,
+    )
+
+    assert response.json()["executed"] is False
+    projects = await client.get("/projects", headers=headers)
+    assert projects.json() == []
 
 
 @pytest.mark.asyncio
@@ -3037,6 +3065,19 @@ class _RogueResolver:
         return ResolvedAction(action="task.delete")
 
 
+class _InvalidProjectResolver:
+    def resolve(self, message: str, world: WorldView) -> ResolvedAction:
+        return ResolvedAction(action=registry.PROJECT_CREATE)
+
+
+class _WhitespaceProjectResolver:
+    def resolve(self, message: str, world: WorldView) -> ResolvedAction:
+        return ResolvedAction(
+            action=registry.PROJECT_CREATE,
+            project_name="  Japan Trip  ",
+        )
+
+
 @pytest.mark.asyncio
 async def test_unknown_action_refused(ctx) -> None:
     client, sessionmaker = ctx
@@ -3048,6 +3089,67 @@ async def test_unknown_action_refused(ctx) -> None:
         service = ConversationService(session, resolver=_RogueResolver())
         with pytest.raises(UnknownActionError):
             await service.handle(user, "delete everything")
+
+
+@pytest.mark.asyncio
+async def test_invalid_deterministic_action_never_reaches_domain_mutation(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, resolver=_InvalidProjectResolver())
+        service._projects.create_project = AsyncMock()
+
+        with pytest.raises(ActionArgumentsError):
+            await service.handle(user, "Create an unnamed project")
+
+        service._projects.create_project.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_execution_consumes_validated_values(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, resolver=_WhitespaceProjectResolver())
+        response = await service.handle(user, "Create the Japan project")
+        projects = await service._projects.list_projects(user)
+
+    assert response.executed is True
+    assert [project.name for project in projects] == ["Japan Trip"]
+
+
+@pytest.mark.asyncio
+async def test_registered_execution_returns_normalized_result_envelope(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session)
+        result = await service._execute_action(
+            user,
+            ResolvedAction(
+                action=registry.PROJECT_CREATE,
+                project_name="Japan Trip",
+            ),
+            WorldView(projects=(), tasks=()),
+        )
+
+    assert result.success is True
+    assert result.action == registry.PROJECT_CREATE
+    assert result.payload == {"kind": "project_created", "executed": True}
+    assert result.display_summary == "project created: Japan Trip"
+    assert len(result.entity_ids) == 1
+    assert result.references[0].kind == "project"
+    assert result.references[0].display_text == "Japan Trip"
+    assert result.references[0].entity_id == result.entity_ids[0]
 
 
 # --------------------------------------------------------------------------
