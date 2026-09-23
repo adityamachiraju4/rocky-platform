@@ -53,7 +53,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
           <div><p className="cc-meta">{focus.projectName}</p><h3>{focus.task.title}</h3><p className="cc-focus-context">{recent ? `Last touched ${when(recent.created_at)}` : "Ready for your next step"}</p></div>
           <Link className="cc-continue" to={`/projects/${focus.projectId}`}>Continue <span aria-hidden="true">→</span></Link>
         </div>
-      </> : <div className="cc-focus-empty"><span className="cc-focus-symbol" aria-hidden="true">✦</span><div><h3>Your attention is open.</h3><p>Start something new, or ask Rocky what is worth focusing on next.</p></div><Link className="cc-continue" to="/projects">Browse projects <span aria-hidden="true">→</span></Link></div>}
+      </> : <div className="cc-focus-empty"><span className="cc-focus-symbol" aria-hidden="true">✦</span><div><h3>Your attention is open.</h3><p>Ask Rocky what to begin, or give your next idea a place to grow.</p></div><Link className="cc-continue" to="/projects">Start a project <span aria-hidden="true">→</span></Link></div>}
     </section>
 
     <section className="cc-panel cc-today">
@@ -77,7 +77,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
         {!data.errors.work && focus && <li><span aria-hidden="true">↗</span><Link to={`/projects/${focus.projectId}`}><strong>{focus.task.title}</strong><small>Still open in {focus.projectName}</small></Link></li>}
         {!data.errors.notifications && notifications.map((item) => <li key={item.id}><span aria-hidden="true">✧</span><Link to="/notifications"><strong>{item.title}</strong><p>{item.body}</p><small>{when(item.created_at)}</small></Link></li>)}
       </ul>
-      {!hasObservations && <Empty>{data.errors.work || data.errors.reminders || data.errors.notifications ? "Some workspace signals are unavailable. Try refreshing." : "Nothing to call out yet. Your real work and reminders will guide what appears here."}</Empty>}
+      {!hasObservations && <Empty>{data.errors.work || data.errors.reminders || data.errors.notifications ? "Some workspace signals are unavailable. Try refreshing." : "Rocky will surface timely reminders, unfinished work, and useful changes here."}</Empty>}
     </section>
 
     <section className="cc-panel cc-projects">
@@ -89,7 +89,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
           <p>{next ? next.task.title : "No open tasks"}</p>
           <small>{activeTaskCount} open {activeTaskCount === 1 ? "task" : "tasks"} · Updated {when(project.updated_at)}</small>
         </Link>;
-      })}</div> : <Empty>No projects yet. Start a project to give your work a place to continue.</Empty>}
+      })}</div> : <Empty>Projects you begin with Rocky will stay ready here.</Empty>}
     </section>
 
     <section className="cc-panel cc-activity">
@@ -98,7 +98,7 @@ export default function CommandCenterPanels({ data }: { data: MissionControlData
         const ref = data.entityById.get(item.entity_id);
         const body = <><span className="cc-activity-dot" /><span><strong>{ref?.name ?? humanizeEvent(item.event_type)}</strong><small>{humanizeEvent(item.event_type)} · {when(item.created_at)}</small></span></>;
         return <li key={item.id}>{ref ? <Link to={`/projects/${ref.projectId}`}>{body}</Link> : <div>{body}</div>}</li>;
-      })}</ul> : <Empty>Your workspace activity will appear here as you make progress.</Empty>}
+      })}</ul> : <Empty>Your progress will appear here as the workspace takes shape.</Empty>}
     </section>
   </div>;
 }
