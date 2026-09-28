@@ -62,6 +62,7 @@ class ActionRegistry:
                 "arguments": definition.argument_schema(),
                 "reference": definition.reference.value,
                 "reference_kind": definition.reference_kind,
+                "result_kind": definition.result_kind,
             }
             for definition in self.definitions
         )

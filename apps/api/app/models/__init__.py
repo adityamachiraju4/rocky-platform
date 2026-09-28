@@ -22,6 +22,7 @@ from app.models.conversation import (
     ConversationThread,
     ConversationTurnRecord,
     GroundedReference,
+    PendingConversationPlan,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "ConversationThread",
     "ConversationTurnRecord",
     "GroundedReference",
+    "PendingConversationPlan",
 ]

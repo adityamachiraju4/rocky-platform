@@ -20,14 +20,14 @@ DEFINITIONS = (
         name="project.list", description="List the authenticated user's projects.",
         arguments=ProjectListArgs, mode=ActionMode.READ, risk=RiskLevel.READ,
         confirmation=ConfirmationPolicy.NONE, reference=ReferencePolicy.NONE,
-        reference_kind=None, requires_world=False, grounder=ActionDomain.PROJECT,
+        reference_kind=None, result_kind=None, requires_world=False, grounder=ActionDomain.PROJECT,
         executor=ExecutorKey.PROJECT_LIST,
     ),
     ActionDefinition(
         name="project.create", description="Create one project with a name.",
         arguments=ProjectCreateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.NONE, reference_kind=None,
+        reference=ReferencePolicy.NONE, reference_kind=None, result_kind="project",
         requires_world=False, grounder=ActionDomain.PROJECT, executor=ExecutorKey.PROJECT_CREATE,
     ),
 )

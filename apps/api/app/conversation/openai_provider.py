@@ -30,6 +30,8 @@ Classify the user's utterance as one of:
   a useful answer to a general knowledge, explanation, math, recipe, or humor
   request
 - action: one allowed action proposal
+- plan: one ordered proposal of 2 to 8 allowed actions when the request clearly
+  asks for multiple actions
 - personal_context: answering requires Rocky data, but the request is not one
   direct action proposal. Use this only when rocky_world is absent. When
   rocky_world is present, answer from those facts or ask for clarification.
@@ -61,6 +63,12 @@ human title/reference, never a database ID. context_or_reference means a
 human project reference may be omitted only when the user clearly relies on
 the last grounded project. Never include owner, timestamps, or internal IDs.
 ACTION_CATALOG={ACTION_REGISTRY.model_prompt()}
+
+For plan, use stable ids step_1 through step_8 in declared order. Use result_of
+to consume the compatible result of an earlier step, and include that id in
+depends_on. Use a human reference in reference for an existing entity; never
+put an ID there. Do not return a one-step plan. Plans are linear and finite:
+never add conditions, loops, retries, waits, or continuation steps.
 
 For recall, use activity.recall and set recall_window to "yesterday" only for
 local-calendar-yesterday wording; otherwise use "recent" or omit it.

@@ -25,21 +25,21 @@ DEFINITIONS = (
         name="reminder.create", description="Create one reminder from explicit time wording.",
         arguments=ReminderCreateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.NONE, reference_kind=None, requires_world=False,
+        reference=ReferencePolicy.NONE, reference_kind=None, result_kind="reminder", requires_world=False,
         grounder=ActionDomain.REMINDER, executor=ExecutorKey.REMINDER_CREATE,
     ),
     ActionDefinition(
         name="reminder.list", description="List open reminders.",
         arguments=ReminderListArgs, mode=ActionMode.READ, risk=RiskLevel.READ,
         confirmation=ConfirmationPolicy.NONE, reference=ReferencePolicy.NONE,
-        reference_kind=None, requires_world=False, grounder=ActionDomain.REMINDER,
+        reference_kind=None, result_kind=None, requires_world=False, grounder=ActionDomain.REMINDER,
         executor=ExecutorKey.REMINDER_LIST,
     ),
     ActionDefinition(
         name="reminder.complete", description="Complete one open reminder.",
         arguments=ReminderStateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.REQUIRED, reference_kind="reminder",
+        reference=ReferencePolicy.REQUIRED, reference_kind="reminder", result_kind="reminder",
         requires_world=True, grounder=ActionDomain.REMINDER, executor=ExecutorKey.REMINDER_COMPLETE,
     ),
     ActionDefinition(
@@ -47,7 +47,7 @@ DEFINITIONS = (
         arguments=ReminderStateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.DESTRUCTIVE_OR_REVERSAL,
         confirmation=ConfirmationPolicy.PLAN_STEP,
-        reference=ReferencePolicy.REQUIRED, reference_kind="reminder",
+        reference=ReferencePolicy.REQUIRED, reference_kind="reminder", result_kind="reminder",
         requires_world=True, grounder=ActionDomain.REMINDER, executor=ExecutorKey.REMINDER_CANCEL,
     ),
 )

@@ -12,6 +12,15 @@ Environment variables
 * ``OPENAI_API_KEY`` — optional key for model-backed understanding.
 * ``OPENAI_MODEL`` — optional OpenAI Responses model for understanding.
 * ``OPENAI_TIMEOUT_SECONDS`` — optional provider timeout.
+* ``TYPESAFE_ENABLED`` — enable the optional structured-decision provider.
+* ``TYPESAFE_API_KEY`` — optional TypeSafe bearer credential.
+* ``TYPESAFE_BASE_URL`` — TypeSafe API origin.
+* ``TYPESAFE_MODEL`` — model name or working alias accepted by System One.
+* ``TYPESAFE_TIMEOUT_SECONDS`` — strict TypeSafe request timeout.
+* ``TYPESAFE_ROUTE_ENABLED`` — enable ambiguous-route decisions.
+* ``TYPESAFE_CONFIRMATION_ENABLED`` — enable ambiguous-confirmation decisions.
+* ``TYPESAFE_PLAN_VERIFICATION_ENABLED`` — enable advisory plan verification.
+* ``TYPESAFE_PLAN_VERIFICATION_REQUIRED`` — fail closed when verification is unavailable.
 * ``OPENAI_TTS_API_KEY`` — optional official OpenAI key for speech rendering.
 * ``OPENAI_TTS_BASE_URL`` — optional speech API base URL.
 * ``OPENAI_TTS_MODEL`` — optional OpenAI speech model for spoken replies.
@@ -77,6 +86,8 @@ _DEFAULT_SESSION_TTL_DAYS = 30
 _DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30
 _DEFAULT_OPENAI_MODEL = "gpt-5-nano"
 _DEFAULT_OPENAI_TIMEOUT_SECONDS = 4.0
+_DEFAULT_TYPESAFE_BASE_URL = "https://api.typesafe.ai"
+_DEFAULT_TYPESAFE_TIMEOUT_SECONDS = 2.0
 _DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 _DEFAULT_OPENAI_TTS_VOICE = "cedar"
@@ -224,6 +235,59 @@ def get_openai_timeout_seconds() -> float:
         raise RuntimeError(
             f"OPENAI_TIMEOUT_SECONDS must be numeric, got {raw!r}"
         ) from exc
+
+
+def get_typesafe_enabled() -> bool:
+    return _env_bool("TYPESAFE_ENABLED", False)
+
+
+def get_typesafe_api_key() -> str | None:
+    raw = os.getenv("TYPESAFE_API_KEY")
+    return raw.strip() if raw and raw.strip() else None
+
+
+def get_typesafe_base_url() -> str:
+    raw = (os.getenv("TYPESAFE_BASE_URL") or _DEFAULT_TYPESAFE_BASE_URL).strip().rstrip("/")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+        raise RuntimeError("TYPESAFE_BASE_URL must be an HTTP(S) URL without a query or fragment.")
+    return raw
+
+
+def get_typesafe_model() -> str | None:
+    raw = os.getenv("TYPESAFE_MODEL")
+    return raw.strip() if raw and raw.strip() else None
+
+
+def get_typesafe_timeout_seconds() -> float:
+    raw = os.getenv("TYPESAFE_TIMEOUT_SECONDS")
+    if not raw:
+        return _DEFAULT_TYPESAFE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"TYPESAFE_TIMEOUT_SECONDS must be numeric, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise RuntimeError("TYPESAFE_TIMEOUT_SECONDS must be greater than zero.")
+    return value
+
+
+def get_typesafe_route_enabled() -> bool:
+    return _env_bool("TYPESAFE_ROUTE_ENABLED", True)
+
+
+def get_typesafe_confirmation_enabled() -> bool:
+    return _env_bool("TYPESAFE_CONFIRMATION_ENABLED", True)
+
+
+def get_typesafe_plan_verification_enabled() -> bool:
+    return _env_bool("TYPESAFE_PLAN_VERIFICATION_ENABLED", True)
+
+
+def get_typesafe_plan_verification_required() -> bool:
+    return _env_bool("TYPESAFE_PLAN_VERIFICATION_REQUIRED", False)
 
 
 def get_openai_tts_api_key() -> str | None:
@@ -470,6 +534,15 @@ __all__ = [
     "get_openai_api_key",
     "get_openai_model",
     "get_openai_timeout_seconds",
+    "get_typesafe_enabled",
+    "get_typesafe_api_key",
+    "get_typesafe_base_url",
+    "get_typesafe_model",
+    "get_typesafe_timeout_seconds",
+    "get_typesafe_route_enabled",
+    "get_typesafe_confirmation_enabled",
+    "get_typesafe_plan_verification_enabled",
+    "get_typesafe_plan_verification_required",
     "get_openai_tts_api_key",
     "get_openai_tts_base_url",
     "get_openai_tts_model",

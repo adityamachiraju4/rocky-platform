@@ -21,6 +21,7 @@ Conversation owns no state. These tests drive it two ways:
 from __future__ import annotations
 
 import json
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, time, timedelta, timezone
@@ -32,6 +33,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -47,7 +49,9 @@ from app.models.scheduled_job import ScheduledJob
 from app.notifications.schemas import NotificationCreate
 from app.notifications.service import NotificationsService
 from app.models.user import User
-from app.models.conversation import ConversationThread, ConversationTurnRecord
+from app.models.conversation import (
+    ConversationThread, ConversationTurnRecord, PendingConversationPlan,
+)
 from app.conversation.context import (
     MAX_STORED_TURNS,
     RECENT_TURN_LIMIT,
@@ -69,6 +73,7 @@ from app.conversation.understanding import (
     Clarification,
     ConversationTurn,
     PersonalContextRequest,
+    PlanProposal,
     UNDERSTANDING_JSON_SCHEMA,
     UnderstandingProviderError,
     UnderstandingResult,
@@ -76,9 +81,25 @@ from app.conversation.understanding import (
     parse_understanding_payload,
     safe_world_payload,
 )
+from app.conversation.plans.base import ProposedPlan, ProposedPlanStep
+from app.conversation.plans.compiler import PlanCompiler
+from app.conversation.plans.store import (
+    PendingPlanConflictError,
+    PendingPlanStore,
+    PlanLifecycleTransitionError,
+)
 from app.live.dependencies import get_live_intelligence_service
 from app.live.service import LiveLookupResult
 from app.live.schemas import SourceMetadata, WeatherReport
+from app.intelligence.decision import (
+    ConfirmationDecision,
+    ConfirmationKind,
+    DecisionPolicy,
+    DecisionProviderError,
+    PlanVerificationDecision,
+    RouteDecision,
+    RouteKind,
+)
 
 SECRET = "test-secret-key"
 PEPPER = "test-refresh-pepper"
@@ -98,6 +119,53 @@ class _FakeUnderstandingProvider:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class _FakeDecisionProvider:
+    def __init__(
+        self,
+        *,
+        route: RouteDecision | Exception | None = None,
+        confirmation: ConfirmationDecision | Exception | None = None,
+        verification: PlanVerificationDecision | Exception | None = None,
+    ) -> None:
+        self.route_result = route or RouteDecision(
+            RouteKind.CONVERSATION, 0.95, {"conversation": 0.95}
+        )
+        self.confirmation_result = confirmation or ConfirmationDecision(
+            ConfirmationKind.UNCERTAIN, 0.95, {"uncertain": 0.95}
+        )
+        self.verification_result = verification or PlanVerificationDecision(
+            unrequested_action_probability=0.03,
+            omitted_action_probability=0.02,
+            excessive_mutation_probability=0.01,
+            faithful_probability=0.95,
+        )
+        self.route_calls: list[str] = []
+        self.confirmation_calls: list[tuple[str, str]] = []
+        self.verification_calls: list[tuple[str, object]] = []
+
+    async def classify_route(self, message: str) -> RouteDecision:
+        self.route_calls.append(message)
+        if isinstance(self.route_result, Exception):
+            raise self.route_result
+        return self.route_result
+
+    async def classify_confirmation(
+        self, response: str, plan_summary: str
+    ) -> ConfirmationDecision:
+        self.confirmation_calls.append((response, plan_summary))
+        if isinstance(self.confirmation_result, Exception):
+            raise self.confirmation_result
+        return self.confirmation_result
+
+    async def verify_plan(
+        self, request: str, plan: object
+    ) -> PlanVerificationDecision:
+        self.verification_calls.append((request, plan))
+        if isinstance(self.verification_result, Exception):
+            raise self.verification_result
+        return self.verification_result
 
 
 def _use_fake_provider(
@@ -177,6 +245,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
     monkeypatch.setenv("REFRESH_TOKEN_PEPPER", PEPPER)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Normal tests are hermetic even when a developer's local .env enables
+    # the optional live TypeSafe adapter. Decision-specific tests inject a
+    # fake provider directly.
+    monkeypatch.setenv("TYPESAFE_ENABLED", "false")
 
 
 @pytest_asyncio.fixture
@@ -3094,7 +3166,7 @@ async def test_unknown_action_refused(ctx) -> None:
 @pytest.mark.asyncio
 async def test_invalid_deterministic_action_never_reaches_domain_mutation(ctx) -> None:
     client, sessionmaker = ctx
-    _, user_id = await _auth_headers(client, sessionmaker)
+    headers, user_id = await _auth_headers(client, sessionmaker)
 
     async with sessionmaker() as session:
         user = await session.get(User, uuid.UUID(user_id))
@@ -3150,6 +3222,884 @@ async def test_registered_execution_returns_normalized_result_envelope(ctx) -> N
     assert result.references[0].kind == "project"
     assert result.references[0].display_text == "Japan Trip"
     assert result.references[0].entity_id == result.entity_ids[0]
+
+
+def _proposed_plan_step(
+    number: int,
+    action: str,
+    arguments: dict[str, str] | None = None,
+    *,
+    result_of: str | None = None,
+    reference: str | None = None,
+) -> ProposedPlanStep:
+    return ProposedPlanStep(
+        id=f"step_{number}", action=action, arguments=arguments or {},
+        reference=reference, result_of=result_of,
+        depends_on=[result_of] if result_of else [],
+        purpose=f"Run {action}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_safe_project_and_tasks_plan_executes_in_order(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "project.create", {"name": "Japan Trip"}),
+        _proposed_plan_step(2, "task.create", {"title": "Book Flights"}, result_of="step_1"),
+        _proposed_plan_step(3, "task.create", {"title": "Reserve Hotel"}, result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "Create a Japan Trip project and add Book Flights, then add Reserve Hotel"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["executed"] is True
+    assert response.json()["action"] == "plan"
+    projects = (await client.get("/projects", headers=headers)).json()
+    assert [project["name"] for project in projects] == ["Japan Trip"]
+    tasks = (await client.get(f"/projects/{projects[0]['id']}/tasks", headers=headers)).json()
+    assert [task["title"] for task in tasks] == ["Book Flights", "Reserve Hotel"]
+
+
+@pytest.mark.asyncio
+async def test_result_grounded_create_plan_does_not_load_broad_world(ctx) -> None:
+    provider = _FakeUnderstandingProvider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "project.create", {"name": "Lean"}),
+        _proposed_plan_step(2, "task.create", {"title": "Bounded"}, result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, understanding_provider=provider)
+        service._build_world = AsyncMock()
+        response = await service.handle(
+            user, "Create project Lean and then add task Bounded"
+        )
+        service._build_world.assert_not_awaited()
+
+    assert response.executed is True
+
+
+@pytest.mark.asyncio
+async def test_risky_plan_is_durable_confirmed_once_and_cannot_replay(ctx) -> None:
+    provider = _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Old Ideas", "content": "draft"}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    proposed = await client.post(
+        "/conversation",
+        json={"message": "Create a note called Old Ideas and then archive it"},
+        headers=headers,
+    )
+    assert proposed.json()["executed"] is False
+    assert "Shall I proceed" in proposed.json()["reply"]
+    assert (await client.get("/notes?status=archived", headers=headers)).json() == []
+
+    confirmed = await client.post(
+        "/conversation", json={"message": "Yes"}, headers=headers
+    )
+    assert confirmed.json()["executed"] is True
+    archived = (await client.get("/notes?status=archived", headers=headers)).json()
+    assert [note["title"] for note in archived] == ["Old Ideas"]
+
+    duplicate = await client.post(
+        "/conversation", json={"message": "Yes"}, headers=headers
+    )
+    assert duplicate.json()["executed"] is False
+    assert "isn't a pending plan" in duplicate.json()["reply"]
+    assert len((await client.get("/notes?status=archived", headers=headers)).json()) == 1
+    assert len(provider.calls) == 1
+
+    async with sessionmaker() as session:
+        stored = await session.scalar(select(PendingConversationPlan))
+        assert stored is not None
+        assert stored.status == "completed"
+        assert stored.result_payload["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_pending_plan_rejection_executes_nothing(ctx) -> None:
+    provider = _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "list.create", {"title": "Old"}),
+        _proposed_plan_step(2, "list.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "Create an Old list and then archive it"},
+        headers=headers,
+    )
+    rejected = await client.post(
+        "/conversation", json={"message": "Cancel"}, headers=headers
+    )
+
+    assert rejected.json()["executed"] is False
+    assert (await client.get("/lists", headers=headers)).json() == []
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_plan_is_scoped_to_its_thread(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Private", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    first = (await client.post("/conversation/threads", json={"title": "First"}, headers=headers)).json()["id"]
+    second = (await client.post("/conversation/threads", json={"title": "Second"}, headers=headers)).json()["id"]
+
+    await client.post(
+        "/conversation",
+        json={"message": "Create a Private note and then archive it", "thread_id": first},
+        headers=headers,
+    )
+    wrong_thread = await client.post(
+        "/conversation", json={"message": "Proceed", "thread_id": second}, headers=headers
+    )
+    assert wrong_thread.json()["executed"] is False
+    assert (await client.get("/notes?status=archived", headers=headers)).json() == []
+
+    right_thread = await client.post(
+        "/conversation", json={"message": "Proceed", "thread_id": first}, headers=headers
+    )
+    assert right_thread.json()["executed"] is True
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_plan_executes_nothing(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Expired", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    proposed = await client.post(
+        "/conversation",
+        json={"message": "Create an Expired note and then archive it"},
+        headers=headers,
+    )
+    assert proposed.json()["executed"] is False
+    async with sessionmaker() as session:
+        stored = await session.scalar(select(PendingConversationPlan))
+        assert stored is not None
+        stored.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+
+    expired = await client.post(
+        "/conversation", json={"message": "Confirm"}, headers=headers
+    )
+    assert expired.json()["executed"] is False
+    assert "expired" in expired.json()["reply"]
+    assert (await client.get("/notes?status=archived", headers=headers)).json() == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_revalidates_changed_reference_before_any_step(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "project.create", {"name": "Must Not Exist"}),
+        _proposed_plan_step(2, "note.archive", reference="Old Ideas"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    note = (await client.post(
+        "/notes", json={"title": "Old Ideas", "content": "draft"}, headers=headers
+    )).json()
+    await client.post(
+        "/conversation",
+        json={"message": "Create project Must Not Exist and then archive Old Ideas"},
+        headers=headers,
+    )
+    await client.patch(
+        f"/notes/{note['id']}", json={"status": "archived"}, headers=headers
+    )
+
+    confirmed = await client.post(
+        "/conversation", json={"message": "Proceed"}, headers=headers
+    )
+    assert confirmed.json()["executed"] is False
+    assert "revalidate" in confirmed.json()["reply"]
+    assert (await client.get("/projects", headers=headers)).json() == []
+
+
+@pytest.mark.asyncio
+async def test_new_pending_plan_supersedes_old_without_resurfacing(ctx) -> None:
+    first_plan = PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Old Plan", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ]))
+    second_plan = PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "New Plan", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ]))
+    provider = _use_fake_provider([first_plan, second_plan])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "Create Old Plan note and then archive it"},
+        headers=headers,
+    )
+    await client.post(
+        "/conversation",
+        json={"message": "Instead create New Plan note and then archive it"},
+        headers=headers,
+    )
+    async with sessionmaker() as session:
+        rows = list((await session.scalars(select(PendingConversationPlan))).all())
+        assert [row.status for row in rows].count("pending") == 1
+        assert [row.status for row in rows].count("rejected") == 1
+
+    confirmed = await client.post(
+        "/conversation", json={"message": "Confirm"}, headers=headers
+    )
+    assert confirmed.json()["executed"] is True
+    duplicate = await client.post(
+        "/conversation", json={"message": "Confirm"}, headers=headers
+    )
+    assert duplicate.json()["executed"] is False
+    archived = (await client.get("/notes?status=archived", headers=headers)).json()
+    assert [note["title"] for note in archived] == ["New Plan"]
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_two_pending_rows_for_same_owner_thread(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Unique", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "Create Unique note and then archive it"},
+        headers=headers,
+    )
+
+    async with sessionmaker() as session:
+        existing = await session.scalar(select(PendingConversationPlan))
+        assert existing is not None
+        session.add(PendingConversationPlan(
+            user_id=existing.user_id,
+            thread_id=existing.thread_id,
+            status="pending",
+            version=1,
+            plan_payload=existing.plan_payload,
+            expires_at=existing.expires_at,
+        ))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_competing_plan_storage_conflict_returns_safe_response(ctx) -> None:
+    provider = _FakeUnderstandingProvider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Conflict", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, understanding_provider=provider)
+        service._pending_plans.create = AsyncMock(
+            side_effect=PendingPlanConflictError("competing plan")
+        )
+        response = await service.handle(
+            user, "Create Conflict note and then archive it"
+        )
+
+    assert response.executed is False
+    assert "Another request updated" in response.reply
+
+
+@pytest.mark.asyncio
+async def test_atomic_claim_has_one_winner_and_expiry_cannot_win(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Claim", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "Create Claim note and then archive it"},
+        headers=headers,
+    )
+
+    async with sessionmaker() as first_session, sessionmaker() as second_session:
+        first_row = await first_session.scalar(select(PendingConversationPlan))
+        second_row = await second_session.scalar(select(PendingConversationPlan))
+        assert first_row is not None and second_row is not None
+        now = datetime.now(timezone.utc)
+        first_won, second_won = await asyncio.gather(
+            PendingPlanStore(first_session).claim(first_row, now),
+            PendingPlanStore(second_session).claim(second_row, now),
+        )
+    assert sorted((first_won, second_won)) == [False, True]
+
+    async with sessionmaker() as session:
+        executing = await session.scalar(select(PendingConversationPlan))
+        assert executing is not None
+        assert executing.status == "executing"
+        assert await PendingPlanStore(session).current(
+            executing.user_id, executing.thread_id, datetime.now(timezone.utc)
+        ) is None
+
+        executing.status = "pending"
+        executing.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+        assert await PendingPlanStore(session).claim(
+            executing, datetime.now(timezone.utc)
+        ) is False
+
+
+@pytest.mark.asyncio
+async def test_finish_detects_failed_terminal_transition(ctx) -> None:
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Finish", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    await client.post(
+        "/conversation",
+        json={"message": "Create Finish note and then archive it"},
+        headers=headers,
+    )
+    async with sessionmaker() as session:
+        row = await session.scalar(select(PendingConversationPlan))
+        assert row is not None
+        store = PendingPlanStore(session)
+        assert await store.claim(row, datetime.now(timezone.utc)) is True
+        await store.finish(
+            row, status="failed", result_payload={"status": "failed"},
+            now=datetime.now(timezone.utc),
+        )
+        with pytest.raises(PlanLifecycleTransitionError):
+            await store.finish(
+                row, status="completed", result_payload={"status": "success"},
+                now=datetime.now(timezone.utc),
+            )
+
+
+@pytest.mark.asyncio
+async def test_result_memory_failure_is_partial_and_cannot_replay(ctx) -> None:
+    provider = _FakeUnderstandingProvider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Remember Once", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        proposed = await ConversationService(
+            session, understanding_provider=provider
+        ).handle(user, "Create Remember Once note and then archive it")
+        assert proposed.executed is False
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, understanding_provider=provider)
+        service._remember_outcome = AsyncMock(
+            side_effect=RuntimeError("grounding storage unavailable")
+        )
+        confirmed = await service.handle(user, "Confirm")
+
+    assert confirmed.executed is True
+    assert "action succeeded" in confirmed.reply
+    async with sessionmaker() as session:
+        row = await session.scalar(select(PendingConversationPlan))
+        assert row is not None
+        assert row.status == "failed"
+        assert row.result_payload["status"] == "partial"
+
+    active = (await client.get("/notes?status=active", headers=headers)).json()
+    archived = (await client.get("/notes?status=archived", headers=headers)).json()
+    assert [note["title"] for note in active] == ["Remember Once"]
+    assert archived == []
+
+    duplicate = await client.post(
+        "/conversation", json={"message": "Confirm"}, headers=headers
+    )
+    assert duplicate.json()["executed"] is False
+    assert len((await client.get("/notes?status=active", headers=headers)).json()) == 1
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_persistence_failure_stays_executing_and_nonreplayable(ctx) -> None:
+    provider = _FakeUnderstandingProvider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Terminal Once", "content": ""}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ])))
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        await ConversationService(
+            session, understanding_provider=provider
+        ).handle(user, "Create Terminal Once note and then archive it")
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, understanding_provider=provider)
+        service._pending_plans.finish = AsyncMock(
+            side_effect=PlanLifecycleTransitionError("lost terminal transition")
+        )
+        confirmed = await service.handle(user, "Confirm")
+
+    assert confirmed.executed is True
+    assert "will not be retried" in confirmed.reply
+    async with sessionmaker() as session:
+        row = await session.scalar(select(PendingConversationPlan))
+        assert row is not None
+        assert row.status == "executing"
+
+    duplicate = await client.post(
+        "/conversation", json={"message": "Confirm"}, headers=headers
+    )
+    assert duplicate.json()["executed"] is False
+    archived = (await client.get("/notes?status=archived", headers=headers)).json()
+    assert [note["title"] for note in archived] == ["Terminal Once"]
+    assert len(provider.calls) == 1
+
+
+# --------------------------------------------------------------------------
+# Optional TypeSafe/Jev structured decisions.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deterministic_action_and_live_routes_skip_decision_provider(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    decisions = _FakeDecisionProvider()
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(session, decision_provider=decisions)
+        created = await service.handle(user, "Create project Deterministic")
+        live = await service.handle(user, "What's the weather today?")
+
+    assert created.executed is True
+    assert live.executed is False
+    assert decisions.route_calls == []
+
+
+@pytest.mark.asyncio
+async def test_high_confidence_ambiguous_route_can_short_circuit_only_routing(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(
+        ConversationTurn(kind="conversation", reply="should not be used")
+    )
+    decisions = _FakeDecisionProvider(
+        route=RouteDecision(
+            RouteKind.UNSUPPORTED, 0.96, {"unsupported": 0.96}
+        )
+    )
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        response = await ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+        ).handle(user, "Handle my quantum teleportation account")
+
+    assert response.executed is False
+    assert "can't safely handle" in response.reply
+    assert decisions.route_calls == ["Handle my quantum teleportation account"]
+    assert understanding.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision",
+    [
+        RouteDecision(RouteKind.UNSUPPORTED, 0.40, {"unsupported": 0.40}),
+        DecisionProviderError("decision provider unavailable"),
+    ],
+)
+async def test_low_confidence_or_unavailable_route_falls_back(ctx, decision) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(
+        ConversationTurn(kind="conversation", reply="Existing provider fallback")
+    )
+    decisions = _FakeDecisionProvider(route=decision)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        response = await ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+        ).handle(user, "Tell me about my unusual request")
+
+    assert response.reply == "Existing provider fallback"
+    assert len(understanding.calls) == 1
+
+
+def _risky_note_plan() -> PlanProposal:
+    return PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "note.create", {"title": "Decision", "content": "private"}),
+        _proposed_plan_step(2, "note.archive", result_of="step_1"),
+    ]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("phrase", "executed"), [("Yes", True), ("No", False)])
+async def test_deterministic_confirmation_skips_decision_provider(
+    ctx, phrase: str, executed: bool
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_risky_note_plan())
+    decisions = _FakeDecisionProvider()
+    policy = DecisionPolicy(route_enabled=False, plan_verification_enabled=False)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=policy,
+        )
+        await service.handle(user, "Create Decision note and then archive it")
+        response = await service.handle(user, phrase)
+
+    assert response.executed is executed
+    assert decisions.confirmation_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "message", "executed", "stored_status"),
+    [
+        (ConfirmationKind.CONFIRM, "yeah that's fine", True, "completed"),
+        (ConfirmationKind.REJECT, "that's not what I want", False, "rejected"),
+    ],
+)
+async def test_high_confidence_ambiguous_confirmation_uses_existing_lifecycle(
+    ctx,
+    kind: ConfirmationKind,
+    message: str,
+    executed: bool,
+    stored_status: str,
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_risky_note_plan())
+    decisions = _FakeDecisionProvider(
+        confirmation=ConfirmationDecision(
+            kind, 0.96, {kind.value: 0.96}
+        )
+    )
+    policy = DecisionPolicy(route_enabled=False, plan_verification_enabled=False)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=policy,
+        )
+        await service.handle(user, "Create Decision note and then archive it")
+        response = await service.handle(user, message)
+        stored = await session.scalar(select(PendingConversationPlan))
+
+    assert response.executed is executed
+    assert len(decisions.confirmation_calls) == 1
+    assert "note.create" in decisions.confirmation_calls[0][1]
+    assert "private" not in decisions.confirmation_calls[0][1]
+    assert stored is not None and stored.status == stored_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision",
+    [
+        ConfirmationDecision(
+            ConfirmationKind.CONFIRM, 0.50, {"confirm": 0.50}
+        ),
+        DecisionProviderError("decision provider unavailable"),
+    ],
+)
+async def test_uncertain_confirmation_never_executes_and_remains_pending(
+    ctx, decision
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_risky_note_plan())
+    decisions = _FakeDecisionProvider(confirmation=decision)
+    policy = DecisionPolicy(route_enabled=False, plan_verification_enabled=False)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=policy,
+        )
+        await service.handle(user, "Create Decision note and then archive it")
+        response = await service.handle(user, "sounds okay I suppose")
+        pending = await session.scalar(select(PendingConversationPlan))
+
+    assert response.executed is False
+    assert "not confident" in response.reply
+    assert pending is not None and pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_amendment_invalidates_old_plan_then_routes_fresh(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider([
+        _risky_note_plan(),
+        ConversationTurn(kind="conversation", reply="Amendment received."),
+    ])
+    decisions = _FakeDecisionProvider(
+        confirmation=ConfirmationDecision(
+            ConfirmationKind.AMEND, 0.97, {"amend": 0.97}
+        )
+    )
+    policy = DecisionPolicy(route_enabled=False, plan_verification_enabled=False)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=policy,
+        )
+        await service.handle(user, "Create Decision note and then archive it")
+        response = await service.handle(user, "Actually leave out the archive")
+        pending = await session.scalar(select(PendingConversationPlan))
+
+    assert response.reply == "Amendment received."
+    assert pending is not None and pending.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_pending_response_routes_normally_without_approving_plan(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider([
+        _risky_note_plan(),
+        ConversationTurn(kind="conversation", reply="Separate answer."),
+    ])
+    decisions = _FakeDecisionProvider(
+        confirmation=ConfirmationDecision(
+            ConfirmationKind.UNRELATED, 0.96, {"unrelated": 0.96}
+        )
+    )
+    policy = DecisionPolicy(route_enabled=False, plan_verification_enabled=False)
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=policy,
+        )
+        await service.handle(user, "Create Decision note and then archive it")
+        response = await service.handle(user, "What is a haiku?")
+        pending = await session.scalar(select(PendingConversationPlan))
+
+    assert response.reply == "Separate answer."
+    assert pending is not None and pending.status == "pending"
+
+
+def _safe_project_plan() -> PlanProposal:
+    return PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "project.create", {"name": "Verified One"}),
+        _proposed_plan_step(2, "project.create", {"name": "Verified Two"}),
+    ]))
+
+
+@pytest.mark.asyncio
+async def test_faithful_plan_still_uses_deterministic_compiler_and_executes(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_safe_project_plan())
+    decisions = _FakeDecisionProvider()
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        response = await ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=DecisionPolicy(route_enabled=False),
+        ).handle(user, "Create project Verified One and then create project Verified Two")
+
+    assert response.executed is True
+    assert len(decisions.verification_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verification",
+    [
+        PlanVerificationDecision(0.90, 0.02, 0.01, 0.10),
+        PlanVerificationDecision(0.02, 0.90, 0.01, 0.10),
+        PlanVerificationDecision(0.02, 0.02, 0.90, 0.10),
+    ],
+    ids=["unrequested-action", "omitted-action", "excessive-mutation"],
+)
+async def test_verification_concern_blocks_before_execution(
+    ctx, verification: PlanVerificationDecision
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_safe_project_plan())
+    decisions = _FakeDecisionProvider(
+        verification=verification
+    )
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=DecisionPolicy(route_enabled=False),
+        )
+        response = await service.handle(
+            user, "Create project Verified One and then create project Verified Two"
+        )
+        projects = await service._projects.list_projects(user)
+
+    assert response.executed is False
+    assert "possible mismatch" in response.reply
+    assert projects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required", [False, True])
+async def test_ambiguous_verification_obeys_required_policy(
+    ctx, required: bool
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_safe_project_plan())
+    decisions = _FakeDecisionProvider(
+        verification=PlanVerificationDecision(0.45, 0.40, 0.40, 0.55)
+    )
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=DecisionPolicy(
+                route_enabled=False,
+                plan_verification_required=required,
+            ),
+        )
+        response = await service.handle(
+            user, "Create project Verified One and then create project Verified Two"
+        )
+        projects = await service._projects.list_projects(user)
+
+    assert response.executed is (not required)
+    assert len(projects) == (0 if required else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required", [False, True])
+async def test_verification_unavailable_obeys_required_policy(ctx, required: bool) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    understanding = _FakeUnderstandingProvider(_safe_project_plan())
+    decisions = _FakeDecisionProvider(
+        verification=DecisionProviderError("verification unavailable")
+    )
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=DecisionPolicy(
+                route_enabled=False,
+                plan_verification_required=required,
+            ),
+        )
+        response = await service.handle(
+            user, "Create project Verified One and then create project Verified Two"
+        )
+        projects = await service._projects.list_projects(user)
+
+    assert response.executed is (not required)
+    assert len(projects) == (0 if required else 2)
+
+
+@pytest.mark.asyncio
+async def test_jev_cannot_approve_invalid_rocky_plan(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    invalid = PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "system.delete_everything"),
+        _proposed_plan_step(2, "project.create", {"name": "Never"}),
+    ]))
+    understanding = _FakeUnderstandingProvider(invalid)
+    decisions = _FakeDecisionProvider()
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        response = await ConversationService(
+            session,
+            understanding_provider=understanding,
+            decision_provider=decisions,
+            decision_policy=DecisionPolicy(route_enabled=False),
+        ).handle(user, "Delete everything and create Never")
+
+    assert response.executed is False
+    assert "safe plan" in response.reply
+    assert decisions.verification_calls == []
 
 
 # --------------------------------------------------------------------------

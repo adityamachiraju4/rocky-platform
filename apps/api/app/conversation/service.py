@@ -87,7 +87,7 @@ from app.conversation.context import (
     DurableReference,
     RecentTurn,
 )
-from app.models.conversation import ConversationThread
+from app.models.conversation import ConversationThread, PendingConversationPlan
 from app.conversation.exceptions import (
     AmbiguousReferenceError,
     CompletionTargetNotFoundError,
@@ -129,6 +129,24 @@ from app.conversation.understanding import (
     UnderstandingResult,
     Unsupported,
     ActionProposal,
+    PlanProposal,
+)
+from app.conversation.plans.base import ExecutablePlan, ExecutablePlanStep, PlanResult, PlanStatus
+from app.conversation.plans.compiler import PlanCompiler, PlanValidationError
+from app.conversation.plans.executor import PlanExecutor
+from app.conversation.plans.presentation import confirmation_reply, durable_result_payload, result_reply
+from app.conversation.plans.presentation import pending_plan_summary
+from app.conversation.plans.store import (
+    PendingPlanConflictError,
+    PendingPlanStore,
+)
+from app.intelligence.decision import (
+    ConfirmationKind,
+    DecisionPolicy,
+    DecisionProvider,
+    DecisionProviderError,
+    RouteDecision,
+    RouteKind,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,6 +263,8 @@ class ConversationService:
         resolver: Resolver | None = None,
         responder: Responder | None = None,
         understanding_provider: UnderstandingProvider | None = None,
+        decision_provider: DecisionProvider | None = None,
+        decision_policy: DecisionPolicy | None = None,
         live_service: LiveIntelligenceService | None = None,
         context_store: ConversationContextStore | None = None,
         clock: Clock = system_clock,
@@ -268,8 +288,13 @@ class ConversationService:
         # dispatch. Defaults to the deterministic grounded template.
         self._responder: Responder = responder or TemplateResponder()
         self._understanding_provider = understanding_provider
+        self._decision_provider = decision_provider
+        self._decision_policy = decision_policy or DecisionPolicy()
         self._live_service = live_service
         self._context_store = context_store or ConversationContextStore(session)
+        self._plan_compiler = PlanCompiler()
+        self._plan_executor = PlanExecutor()
+        self._pending_plans = PendingPlanStore(session)
 
     async def _build_world(self, current_user: User) -> WorldView:
         projects = await self._projects.list_projects(current_user)
@@ -363,8 +388,9 @@ class ConversationService:
         language: str | None = None,
         location_context: LocationContext | None = None,
     ) -> ConversationResponse:
+        owner_id = current_user.id
         thread = await self._context_store.resolve_thread(
-            current_user.id, thread_id
+            owner_id, thread_id
         )
         self._current_thread_id = thread.id
         self._current_references = await self._context_store.references(thread.id)
@@ -376,13 +402,33 @@ class ConversationService:
             content=message,
             language=turn_language,
         )
-        response = await self._handle_turn(
-            current_user,
-            message,
-            timezone_name=timezone_name,
-            language=language,
-            location_context=location_context,
+        pending = await self._pending_plans.current(
+            current_user.id, thread.id, ensure_utc(self._clock.now())
         )
+        if pending is not None:
+            response = await self._handle_pending_plan(
+                current_user, message, pending, timezone_name, turn_language
+            )
+        elif self._confirmation_phrase(message) in (
+            self._CONFIRMATIONS | self._REJECTIONS
+        ):
+            response = ConversationResponse(
+                executed=False, thread_id=thread.id, action="plan",
+                reply="There isn't a pending plan to confirm or cancel.",
+                language=turn_language,
+            )
+        else:
+            response = await self._handle_turn(
+                current_user,
+                message,
+                timezone_name=timezone_name,
+                language=language,
+                location_context=location_context,
+            )
+        if getattr(self, "_plan_lifecycle_rolled_back", False):
+            thread = await self._context_store.resolve_thread(
+                owner_id, self._current_thread_id
+            )
         response = response.model_copy(update={"thread_id": thread.id})
         await self._context_store.add_turn(
             thread,
@@ -415,6 +461,197 @@ class ConversationService:
             )
         return response
 
+    _CONFIRMATIONS = frozenset({"yes", "confirm", "go ahead", "proceed", "yes, proceed"})
+    _REJECTIONS = frozenset({"no", "cancel", "don't do that", "do not do that", "reject"})
+
+    @staticmethod
+    def _confirmation_phrase(message: str) -> str:
+        return re.sub(r"[.!?]+$", "", message.strip().lower()).strip()
+
+    async def _handle_pending_plan(
+        self,
+        current_user: User,
+        message: str,
+        pending: PendingConversationPlan,
+        timezone_name: str | None,
+        turn_language: str,
+    ) -> ConversationResponse:
+        now = ensure_utc(self._clock.now())
+        if pending.status == "expired":
+            logger.info("Plan expired", extra={"plan_id": str(pending.id), "thread_id": str(self._current_thread_id)})
+            return ConversationResponse(
+                executed=False, thread_id=self._current_thread_id, action="plan",
+                reply="That plan expired without being run. Please repeat the request if you still want me to do it.",
+                language=turn_language,
+            )
+
+        phrase = self._confirmation_phrase(message)
+        confirmation_kind: ConfirmationKind | None = None
+        if phrase in self._CONFIRMATIONS:
+            confirmation_kind = ConfirmationKind.CONFIRM
+        elif phrase in self._REJECTIONS:
+            confirmation_kind = ConfirmationKind.REJECT
+        elif (
+            self._decision_provider is not None
+            and self._decision_policy.confirmation_enabled
+        ):
+            try:
+                proposed = self._pending_plans.proposed(pending)
+                decision = await self._decision_provider.classify_confirmation(
+                    message, pending_plan_summary(proposed)
+                )
+            except DecisionProviderError as exc:
+                logger.info(
+                    "typesafe_decision_fallback",
+                    extra={
+                        "decision_type": "confirmation",
+                        "provider_error": type(exc).__name__,
+                        "fallback_used": True,
+                    },
+                )
+                return self._ambiguous_confirmation_response(turn_language)
+            if decision.confidence < self._decision_policy.confirmation_min_confidence:
+                logger.info(
+                    "typesafe_low_confidence",
+                    extra={
+                        "decision_type": "confirmation",
+                        "confidence": decision.confidence,
+                        "fallback_used": True,
+                    },
+                )
+                return self._ambiguous_confirmation_response(turn_language)
+            confirmation_kind = decision.kind
+
+        if confirmation_kind is ConfirmationKind.REJECT:
+            await self._pending_plans.reject(pending, now)
+            logger.info("Plan rejected", extra={"plan_id": str(pending.id), "thread_id": str(self._current_thread_id)})
+            return ConversationResponse(
+                executed=False, thread_id=self._current_thread_id, action="plan",
+                reply="Okay, I cancelled that plan and did not run any of it.",
+                language=turn_language,
+            )
+
+        if confirmation_kind is ConfirmationKind.UNCERTAIN:
+            return self._ambiguous_confirmation_response(turn_language)
+
+        if confirmation_kind is ConfirmationKind.UNRELATED:
+            return await self._handle_turn(
+                current_user, message, timezone_name=timezone_name,
+                language=turn_language,
+            )
+
+        if confirmation_kind is not ConfirmationKind.CONFIRM:
+            # Conservative amendment behavior: the old plan can never be
+            # confirmed after a new instruction. Route the full new turn.
+            await self._pending_plans.reject(pending, now)
+            logger.info("Pending plan invalidated by new instruction", extra={"plan_id": str(pending.id)})
+            return await self._handle_turn(
+                current_user, message, timezone_name=timezone_name,
+                language=turn_language,
+            )
+
+        if not await self._pending_plans.claim(pending, now):
+            return ConversationResponse(
+                executed=False, thread_id=self._current_thread_id, action="plan",
+                reply="That plan has already been handled or is no longer available.",
+                language=turn_language,
+            )
+
+        logger.info("Plan confirmed", extra={"plan_id": str(pending.id), "thread_id": str(self._current_thread_id)})
+        try:
+            proposed = self._pending_plans.proposed(pending)
+            plan = self._plan_compiler.compile(proposed, plan_id=pending.id)
+            world = await self._world_for_plan(current_user, plan)
+            await self._preflight_plan(current_user, plan, world)
+            result = await self._execute_plan(current_user, plan, timezone_name)
+        except Exception as exc:  # noqa: BLE001 - confirmed plans fail closed
+            logger.warning("Confirmed plan revalidation failed", extra={"plan_id": str(pending.id)}, exc_info=True)
+            terminal_persisted = await self._finish_pending_plan(
+                pending,
+                status="failed",
+                result_payload={
+                    "status": "invalid", "failure": type(exc).__name__
+                },
+            )
+            return ConversationResponse(
+                executed=False, thread_id=self._current_thread_id, action="plan",
+                reply=(
+                    "I couldn't safely revalidate that plan, so I did not run it."
+                    + (
+                        " I also couldn't save its final status; it remains "
+                        "non-confirmable and will not be retried."
+                        if not terminal_persisted else ""
+                    )
+                ),
+                language=turn_language,
+            )
+
+        if any(
+            step.failure == "result_persistence_failed"
+            for step in result.steps
+        ) and self._session.in_transaction():
+            # The mutation committed inside its authoritative domain service.
+            # Clear only the failed grounding transaction before recording the
+            # honest terminal partial state; never retry the action.
+            plan_id = pending.id
+            await self._session.rollback()
+            self._plan_lifecycle_rolled_back = True
+            reloaded = await self._session.get(PendingConversationPlan, plan_id)
+            if reloaded is not None:
+                pending = reloaded
+
+        terminal_status = "completed" if result.status is PlanStatus.SUCCESS else "failed"
+        terminal_persisted = await self._finish_pending_plan(
+            pending, status=terminal_status,
+            result_payload=durable_result_payload(result),
+        )
+        reply = result_reply(result)
+        if not terminal_persisted:
+            reply += " I couldn't save the final plan status; it will not be retried."
+        return ConversationResponse(
+            executed=bool(result.completed_steps), thread_id=self._current_thread_id,
+            action="plan", reply=reply, language=turn_language,
+        )
+
+    def _ambiguous_confirmation_response(
+        self, turn_language: str
+    ) -> ConversationResponse:
+        return ConversationResponse(
+            executed=False,
+            thread_id=self._current_thread_id,
+            action="plan",
+            reply=(
+                "I'm not confident whether you want me to run the pending plan. "
+                "Please say 'confirm' to run all of it or 'cancel' to reject it."
+            ),
+            language=turn_language,
+        )
+
+    async def _finish_pending_plan(
+        self,
+        pending: PendingConversationPlan,
+        *,
+        status: str,
+        result_payload: dict[str, object],
+    ) -> bool:
+        plan_id = str(pending.id)
+        try:
+            await self._pending_plans.finish(
+                pending, status=status, result_payload=result_payload,
+                now=ensure_utc(self._clock.now()),
+            )
+        except Exception:  # noqa: BLE001 - executing remains fail-closed
+            if self._session.in_transaction():
+                await self._session.rollback()
+            self._plan_lifecycle_rolled_back = True
+            logger.error(
+                "Plan terminal lifecycle persistence failed",
+                extra={"plan_id": plan_id, "terminal_status": status},
+                exc_info=True,
+            )
+            return False
+        return True
+
     async def _handle_turn(
         self,
         current_user: User,
@@ -427,6 +664,28 @@ class ConversationService:
         resolver_message = normalize_capability_message(message)
         empty_world = WorldView(projects=(), tasks=())
         grounded_world: WorldView | None = None
+
+        # The deterministic resolver intentionally recognizes one action. A
+        # conservative multi-verb gate prevents it from greedily treating an
+        # entire multi-action request as one title, while ordinary requests
+        # retain the existing zero-provider fast path.
+        if (
+            self._understanding_provider is not None
+            and self._looks_like_multi_action(message)
+        ):
+            route = await self._route_decision(message)
+            routed = await self._apply_route_decision(
+                current_user, route, turn_language
+            )
+            if isinstance(routed, Outcome):
+                return self._respond(routed, turn_language)
+            outcome = await self._try_provider(
+                current_user, message,
+                routed if isinstance(routed, WorldView) else None,
+                timezone_name, turn_language,
+                fallback=Outcome(kind="no_match", executed=False),
+            )
+            return self._respond(outcome, turn_language)
 
         # Resolver proposes; it executes nothing. Deterministic handling stays
         # first so obvious/offline cases never depend on a model provider. It
@@ -463,10 +722,20 @@ class ConversationService:
                     ),
                     turn_language,
                 )
+            routed_world: WorldView | None = None
+            if self._route_decision_may_help(message):
+                route = await self._route_decision(message)
+                routed = await self._apply_route_decision(
+                    current_user, route, turn_language
+                )
+                if isinstance(routed, Outcome):
+                    return self._respond(routed, turn_language)
+                if isinstance(routed, WorldView):
+                    routed_world = routed
             outcome = await self._try_provider(
                 current_user,
                 message,
-                None,
+                routed_world,
                 timezone_name,
                 turn_language,
                 fallback=Outcome(kind="no_match", executed=False),
@@ -601,12 +870,16 @@ class ConversationService:
 
         if world is None and (
             isinstance(result, ActionProposal)
+            or (
+                isinstance(result, PlanProposal)
+                and self._proposed_plan_requires_world(result)
+            )
             or (isinstance(result, ConversationTurn) and result.reference)
         ):
             world = await self._load_world(current_user)
 
         outcome = await self._outcome_from_understanding(
-            current_user, result, world, timezone_name
+            current_user, result, world, timezone_name, message
         )
         await self._remember_outcome(outcome)
         return outcome
@@ -617,6 +890,7 @@ class ConversationService:
         result: UnderstandingResult,
         world: WorldView | None,
         timezone_name: str | None,
+        original_request: str,
     ) -> Outcome:
         if isinstance(result, ConversationTurn):
             if result.reference:
@@ -672,6 +946,11 @@ class ConversationService:
                 reply=result.reason or "I can't do that yet.",
             )
 
+        if isinstance(result, PlanProposal):
+            return await self._outcome_from_plan(
+                current_user, result, world, timezone_name, original_request
+            )
+
         if not isinstance(result, ActionProposal):
             return Outcome(kind="no_match", executed=False)
 
@@ -703,6 +982,303 @@ class ConversationService:
         return await self._dispatch(
             current_user, action, world, timezone_name
         )
+
+    @staticmethod
+    def _proposed_plan_requires_world(proposal: PlanProposal) -> bool:
+        return any(
+            registry.definition(step.action).requires_world
+            and step.result_of is None
+            for step in proposal.plan.steps
+            if registry.is_allowed(step.action)
+        )
+
+    async def _outcome_from_plan(
+        self,
+        current_user: User,
+        proposal: PlanProposal,
+        world: WorldView | None,
+        timezone_name: str | None,
+        original_request: str,
+    ) -> Outcome:
+        try:
+            plan = self._plan_compiler.compile(proposal.plan)
+            plan_world = world or await self._world_for_plan(current_user, plan)
+            await self._preflight_plan(current_user, plan, plan_world)
+        except (PlanValidationError, CompletionTargetNotFoundError, AmbiguousReferenceError) as exc:
+            logger.info("Plan validation failed", extra={"failure": type(exc).__name__})
+            return Outcome(
+                kind="unsupported", executed=False,
+                reply="I couldn't build a safe plan from that request. Please restate the steps and references.",
+            )
+
+        verification_block = await self._verify_plan(original_request, plan)
+        if verification_block is not None:
+            return verification_block
+
+        logger.info(
+            "Plan proposed",
+            extra={"plan_id": str(plan.id), "step_count": len(plan.steps),
+                   "actions": [step.definition.name for step in plan.steps]},
+        )
+        if plan.requires_confirmation:
+            try:
+                await self._pending_plans.create(
+                    current_user.id, self._current_thread_id, plan,
+                    ensure_utc(self._clock.now()),
+                )
+            except PendingPlanConflictError:
+                logger.info(
+                    "Plan creation lost a concurrent proposal",
+                    extra={"plan_id": str(plan.id)},
+                )
+                return Outcome(
+                    kind="conversation", executed=False, action="plan",
+                    reply=(
+                        "Another request updated the pending plan for this "
+                        "conversation. Please review the latest plan before confirming."
+                    ),
+                )
+            logger.info("Plan awaiting confirmation", extra={"plan_id": str(plan.id)})
+            return Outcome(
+                kind="conversation", executed=False, action="plan",
+                reply=confirmation_reply(plan),
+            )
+
+        result = await self._execute_plan(current_user, plan, timezone_name)
+        return Outcome(
+            kind="conversation", executed=bool(result.completed_steps),
+            action="plan", reply=result_reply(result),
+        )
+
+    async def _verify_plan(
+        self, original_request: str, plan: ExecutablePlan
+    ) -> Outcome | None:
+        policy = self._decision_policy
+        if not policy.plan_verification_enabled:
+            return None
+        if self._decision_provider is None:
+            if policy.plan_verification_required:
+                return self._plan_verification_blocked(
+                    "I couldn't verify that plan with the required independent checker, so I did not run it."
+                )
+            return None
+        try:
+            decision = await self._decision_provider.verify_plan(
+                original_request, plan
+            )
+        except DecisionProviderError as exc:
+            logger.info(
+                "typesafe_decision_fallback",
+                extra={
+                    "decision_type": "plan_verification",
+                    "provider_error": type(exc).__name__,
+                    "fallback_used": not policy.plan_verification_required,
+                },
+            )
+            if policy.plan_verification_required:
+                return self._plan_verification_blocked(
+                    "I couldn't verify that plan with the required independent checker, so I did not run it."
+                )
+            return None
+
+        concern_thresholds = {
+            "unrequested_action": (
+                policy.verification_unrequested_action_probability
+            ),
+            "omitted_action": policy.verification_omitted_action_probability,
+            "excessive_mutation": (
+                policy.verification_excessive_mutation_probability
+            ),
+        }
+        blocking_concerns = {
+            name: probability
+            for name, probability in decision.concern_probabilities.items()
+            if probability >= concern_thresholds[name]
+        }
+        if blocking_concerns:
+            logger.info(
+                "typesafe_plan_verification_concern",
+                extra={
+                    "decision_type": "plan_verification",
+                    "concerns": blocking_concerns,
+                    "fallback_used": False,
+                },
+            )
+            return self._plan_verification_blocked(
+                "The independent plan check found a possible mismatch with your request, so I did not run it. Please restate the exact steps you want."
+            )
+
+        clearly_faithful = (
+            decision.faithful_probability
+            >= policy.verification_faithful_probability
+            and all(
+                probability
+                <= policy.verification_clear_concern_max_probability
+                for probability in decision.concern_probabilities.values()
+            )
+        )
+        if clearly_faithful:
+            return None
+
+        logger.info(
+            "typesafe_ambiguous_decision",
+            extra={
+                "decision_type": "plan_verification",
+                "faithful_probability": decision.faithful_probability,
+                "concern_probabilities": decision.concern_probabilities,
+                "fallback_used": not policy.plan_verification_required,
+            },
+        )
+        if policy.plan_verification_required:
+            return self._plan_verification_blocked(
+                "I couldn't verify that plan confidently, so I did not run it."
+            )
+        return None
+
+    @staticmethod
+    def _plan_verification_blocked(reply: str) -> Outcome:
+        return Outcome(
+            kind="unsupported", executed=False, action="plan", reply=reply
+        )
+
+    async def _world_for_plan(
+        self, current_user: User, plan: ExecutablePlan
+    ) -> WorldView:
+        if any(
+            step.definition.requires_world and step.result_of is None
+            for step in plan.steps
+        ):
+            return await self._load_world(current_user)
+        return WorldView(projects=(), tasks=())
+
+    async def _preflight_plan(
+        self, current_user: User, plan: ExecutablePlan, world: WorldView
+    ) -> None:
+        """Ground every reference that can exist before execution."""
+
+        for step in plan.steps:
+            if step.result_of is None:
+                self._resolved_action_from_plan_step(step, world, {})
+
+    async def _execute_plan(
+        self,
+        current_user: User,
+        plan: ExecutablePlan,
+        timezone_name: str | None,
+    ) -> PlanResult:
+        async def prepare(step: ExecutablePlanStep, references: dict):
+            world = (
+                await self._load_world(current_user)
+                if self._plan_step_needs_world(step)
+                else WorldView(projects=(), tasks=())
+            )
+            return self._resolved_action_from_plan_step(step, world, references), world
+
+        async def execute(action: ResolvedAction, world: WorldView) -> ActionResult:
+            return await self._execute_action(
+                current_user, action, world, timezone_name
+            )
+
+        async def remember(result: ActionResult) -> None:
+            if isinstance(result.outcome, Outcome):
+                await self._remember_outcome(result.outcome)
+
+        return await self._plan_executor.execute(
+            plan, prepare_step=prepare, execute_step=execute,
+            remember_result=remember,
+        )
+
+    @staticmethod
+    def _plan_step_needs_world(step: ExecutablePlanStep) -> bool:
+        if step.result_of is None:
+            return step.definition.requires_world
+        # A list-item completion must resolve the human item text inside the
+        # newly created/grounded list. Other result references already carry
+        # the Rocky-produced ID required by the authoritative domain service.
+        return step.definition.name == registry.LIST_COMPLETE_ITEM
+
+    def _resolved_action_from_plan_step(
+        self,
+        step: ExecutablePlanStep,
+        world: WorldView,
+        references: dict[str, tuple[GroundedResultReference, ...]],
+    ) -> ResolvedAction:
+        arguments = step.arguments.model_dump(exclude_none=True)
+        if step.result_of is None:
+            resolved = self._resolved_action_from_proposal(
+                ActionProposal(
+                    kind="action", action=step.definition.name,
+                    reference=step.reference, arguments=arguments,
+                ),
+                world,
+            )
+            if step.definition.name == registry.TASK_CREATE and resolved.project_id is None:
+                project = self._resolve_context_project(world)
+                resolved = resolved.model_copy(
+                    update={"project_id": project.project_id, "project_name": project.name}
+                )
+            return resolved
+
+        candidates = references.get(step.result_of, ())
+        matches = [
+            reference for reference in candidates
+            if reference.kind == step.definition.reference_kind
+        ]
+        if len(matches) != 1 or matches[0].entity_id is None:
+            raise PlanValidationError("step result is unavailable or incompatible")
+        reference = matches[0]
+        action = step.definition.name
+
+        if action in {registry.TASK_CREATE, registry.TASK_LIST}:
+            return ResolvedAction(
+                action=action, project_id=reference.entity_id,
+                project_name=reference.display_text,
+                task_title=arguments.get("title"),
+            )
+        if action == registry.TASK_UPDATE:
+            project_id = reference.metadata.get("project_id")
+            if not project_id:
+                raise PlanValidationError("task result is missing its project grounding")
+            return ResolvedAction(
+                action=action, task_id=reference.entity_id,
+                task_title=reference.display_text, project_id=uuid.UUID(project_id),
+                project_name=reference.metadata.get("project"),
+                status=arguments["status"],
+            )
+        if action in {registry.REMINDER_COMPLETE, registry.REMINDER_CANCEL}:
+            return ResolvedAction(
+                action=action, reminder_id=reference.entity_id,
+                reminder_title=reference.display_text,
+            )
+        if action in {registry.NOTIFICATION_READ, registry.NOTIFICATION_DISMISS}:
+            return ResolvedAction(action=action, notification_id=reference.entity_id)
+        if action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
+            return ResolvedAction(
+                action=action, note_id=reference.entity_id,
+                note_title=arguments.get("title"), note_content=arguments.get("content"),
+            )
+        if action == registry.LIST_ADD_ITEM:
+            return ResolvedAction(
+                action=action, list_id=reference.entity_id,
+                list_title=reference.display_text,
+                list_item_content=arguments["content"],
+            )
+        if action == registry.LIST_COMPLETE_ITEM:
+            values = [value for value in world.lists if value.list_id == reference.entity_id]
+            if len(values) != 1 or values[0].status != "active":
+                raise CompletionTargetNotFoundError(reference.display_text)
+            item = self._resolve_list_item_reference(arguments["item"], values[0])
+            return ResolvedAction(
+                action=action, list_id=reference.entity_id,
+                list_title=reference.display_text, list_item_id=item.item_id,
+                list_item_content=item.content,
+            )
+        if action == registry.LIST_ARCHIVE:
+            return ResolvedAction(
+                action=action, list_id=reference.entity_id,
+                list_title=reference.display_text,
+            )
+        raise PlanValidationError("action cannot consume a step result")
 
     async def _load_world(self, current_user: User) -> WorldView:
         """Load personal Rocky state only after routing selects that lane."""
@@ -843,7 +1419,7 @@ class ConversationService:
         project_name = action.grounding.project_name
         if project_id is None:
             try:
-                project = self._resolve_context_project(user, world)
+                project = self._resolve_context_project(world)
             except CompletionTargetNotFoundError as exc:
                 return Outcome(kind="target_not_found", executed=False,
                                target=exc.target, target_type="project")
@@ -1398,9 +1974,7 @@ class ConversationService:
             raise AmbiguousReferenceError([p.name for p in matches])
         raise CompletionTargetNotFoundError(target or "that project")
 
-    def _resolve_context_project(
-        self, current_user: User, world: WorldView
-    ) -> ProjectRef:
+    def _resolve_context_project(self, world: WorldView) -> ProjectRef:
         ref = self._durable_reference("project")
         if ref is None or ref.entity_id is None:
             raise CompletionTargetNotFoundError("a project")
@@ -1539,6 +2113,95 @@ class ConversationService:
             if pattern.search(message):
                 return category
         return None
+
+    async def _route_decision(self, message: str) -> RouteDecision | None:
+        if (
+            self._decision_provider is None
+            or not self._decision_policy.route_enabled
+        ):
+            return None
+        try:
+            decision = await self._decision_provider.classify_route(message)
+        except DecisionProviderError as exc:
+            logger.info(
+                "typesafe_decision_fallback",
+                extra={
+                    "decision_type": "route",
+                    "provider_error": type(exc).__name__,
+                    "fallback_used": True,
+                },
+            )
+            return None
+        if decision.confidence < self._decision_policy.route_min_confidence:
+            logger.info(
+                "typesafe_low_confidence",
+                extra={
+                    "decision_type": "route",
+                    "confidence": decision.confidence,
+                    "fallback_used": True,
+                },
+            )
+            return None
+        return decision
+
+    async def _apply_route_decision(
+        self,
+        current_user: User,
+        decision: RouteDecision | None,
+        turn_language: str,
+    ) -> WorldView | Outcome | None:
+        if decision is None:
+            return None
+        if decision.kind is RouteKind.PERSONAL_CONTEXT:
+            return await self._load_world(current_user)
+        if decision.kind is RouteKind.LIVE:
+            return Outcome(
+                kind="conversation",
+                executed=False,
+                reply=live_information_reply("live information", turn_language),
+            )
+        if decision.kind is RouteKind.CLARIFICATION:
+            return Outcome(
+                kind="ambiguous",
+                executed=False,
+                reply="Could you clarify what you want me to do?",
+            )
+        if decision.kind is RouteKind.UNSUPPORTED:
+            return Outcome(
+                kind="unsupported",
+                executed=False,
+                reply="I can't safely handle that request yet.",
+            )
+        # Single action, multi-step plan, and ordinary conversation still go
+        # through the existing understanding provider. The classification has
+        # no authority to propose or execute an action.
+        return None
+
+    @staticmethod
+    def _route_decision_may_help(message: str) -> bool:
+        """Avoid adding a decision call to ordinary provider-backed chat."""
+
+        return bool(
+            re.search(
+                r"\b(?:my|this|that|it|task|project|reminder|notification|note|"
+                r"list|create|make|add|update|complete|archive|dismiss|cancel|"
+                r"current|latest|today|weather|news|price|score)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_multi_action(message: str) -> bool:
+        if not re.search(r"\b(?:and|then|also|after that)\b", message, re.IGNORECASE):
+            return False
+        verbs = re.findall(
+            r"\b(?:create|make|start|add|update|complete|finish|mark|check|archive|"
+            r"dismiss|cancel|remind|list|show)\b",
+            message,
+            re.IGNORECASE,
+        )
+        return len(verbs) >= 2
 
     def _context_payload(
         self,

@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -51,6 +52,9 @@ class ConversationThread(Base):
         back_populates="thread", cascade="all, delete-orphan", passive_deletes=True
     )
     grounded_references: Mapped[list["GroundedReference"]] = relationship(
+        back_populates="thread", cascade="all, delete-orphan", passive_deletes=True
+    )
+    pending_plans: Mapped[list["PendingConversationPlan"]] = relationship(
         back_populates="thread", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -128,5 +132,53 @@ class GroundedReference(Base):
         ),
         Index(
             "ix_conversation_grounded_thread_updated", "thread_id", "updated_at"
+        ),
+    )
+
+
+class PendingConversationPlan(Base):
+    """Validated, bounded plan state used for durable confirmation and replay safety."""
+
+    __tablename__ = "conversation_pending_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversation_threads.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    plan_payload: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    thread: Mapped[ConversationThread] = relationship(back_populates="pending_plans")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'executing', 'completed', 'failed', "
+            "'rejected', 'expired')",
+            name="ck_conversation_pending_plans_status",
+        ),
+        Index(
+            "ix_conversation_pending_plans_owner_thread_status",
+            "user_id", "thread_id", "status",
+        ),
+        Index(
+            "uq_conversation_pending_plans_owner_thread_pending",
+            "user_id", "thread_id", unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
         ),
     )

@@ -89,6 +89,7 @@ class ActionDefinition(Generic[ArgsT]):
     confirmation: ConfirmationPolicy
     reference: ReferencePolicy
     reference_kind: str | None
+    result_kind: str | None
     requires_world: bool
     grounder: ActionDomain
     executor: ExecutorKey

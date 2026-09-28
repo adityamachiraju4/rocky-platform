@@ -38,20 +38,20 @@ DEFINITIONS = (
         name="note.create", description="Create one note with a title and optional content.",
         arguments=NoteCreateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.NONE, reference_kind=None, requires_world=False,
+        reference=ReferencePolicy.NONE, reference_kind=None, result_kind="note", requires_world=False,
         grounder=ActionDomain.NOTE, executor=ExecutorKey.NOTE_CREATE,
     ),
     ActionDefinition(
         name="note.list", description="List active or archived notes.",
         arguments=NoteListArgs, mode=ActionMode.READ, risk=RiskLevel.READ,
         confirmation=ConfirmationPolicy.NONE, reference=ReferencePolicy.NONE,
-        reference_kind=None, requires_world=False, grounder=ActionDomain.NOTE, executor=ExecutorKey.NOTE_LIST,
+        reference_kind=None, result_kind=None, requires_world=False, grounder=ActionDomain.NOTE, executor=ExecutorKey.NOTE_LIST,
     ),
     ActionDefinition(
         name="note.update", description="Update the title or content of one active note.",
         arguments=NoteUpdateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.REQUIRED, reference_kind="note", requires_world=True,
+        reference=ReferencePolicy.REQUIRED, reference_kind="note", result_kind="note", requires_world=True,
         grounder=ActionDomain.NOTE, executor=ExecutorKey.NOTE_UPDATE,
     ),
     ActionDefinition(
@@ -59,7 +59,7 @@ DEFINITIONS = (
         arguments=NoteArchiveArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.DESTRUCTIVE_OR_REVERSAL,
         confirmation=ConfirmationPolicy.PLAN_STEP,
-        reference=ReferencePolicy.REQUIRED, reference_kind="note", requires_world=True,
+        reference=ReferencePolicy.REQUIRED, reference_kind="note", result_kind="note", requires_world=True,
         grounder=ActionDomain.NOTE, executor=ExecutorKey.NOTE_ARCHIVE,
     ),
 )

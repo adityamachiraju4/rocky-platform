@@ -7,11 +7,13 @@ validates registry membership, references, ownership, and state transitions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.conversation import registry
+from app.conversation.plans.base import ProposedPlan, ProposedPlanStep
 from app.conversation.resolver import WorldView
 
 
@@ -30,6 +32,12 @@ class ActionProposal:
     reference: str | None = None
     arguments: dict[str, str] | None = None
     recall_window: str | None = None
+
+
+@dataclass(frozen=True)
+class PlanProposal:
+    kind: Literal["plan"]
+    plan: ProposedPlan
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,7 @@ class Unsupported:
 
 UnderstandingResult = (
     ActionProposal
+    | PlanProposal
     | ConversationTurn
     | PersonalContextRequest
     | Clarification
@@ -92,7 +101,7 @@ class _UnderstandingPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal[
-        "action", "conversation", "personal_context", "clarification", "unsupported"
+        "action", "plan", "conversation", "personal_context", "clarification", "unsupported"
     ]
     action: str | None = None
     reference: str | None = None
@@ -102,6 +111,8 @@ class _UnderstandingPayload(BaseModel):
     prompt: str | None = Field(default=None, max_length=1000)
     candidates: list[str] | None = None
     reason: str | None = Field(default=None, max_length=1000)
+    steps: list[ProposedPlanStep] | None = None
+    summary: str | None = Field(default=None, max_length=1000)
 
     def to_result(self) -> UnderstandingResult:
         if self.kind == "action":
@@ -113,6 +124,11 @@ class _UnderstandingPayload(BaseModel):
                 reference=self.reference,
                 arguments=self.arguments,
                 recall_window=self.recall_window,
+            )
+        if self.kind == "plan":
+            return PlanProposal(
+                kind="plan",
+                plan=ProposedPlan(steps=self.steps or [], summary=self.summary),
             )
         if self.kind == "conversation":
             return ConversationTurn(
@@ -138,6 +154,56 @@ def parse_understanding_payload(data: object) -> UnderstandingResult:
         raise UnderstandingProviderError("Malformed understanding result.") from exc
 
 
+def _model_plan_step_schema() -> dict[str, Any]:
+    """Build the discriminated step contract from the CI-3 registry."""
+
+    def strict_arguments_schema() -> dict[str, Any]:
+        schema = deepcopy(definition.argument_schema())
+
+        def clean(value: object) -> None:
+            if isinstance(value, dict):
+                value.pop("default", None)
+                value.pop("title", None)
+                for key, nested in value.items():
+                    if key == "properties" and isinstance(nested, dict):
+                        for property_schema in nested.values():
+                            clean(property_schema)
+                    else:
+                        clean(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    clean(nested)
+
+        clean(schema)
+        properties = schema.get("properties", {})
+        schema["required"] = list(properties)
+        return schema
+
+    variants: list[dict[str, Any]] = []
+    for definition in registry.ACTION_REGISTRY.definitions:
+        variants.append({
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string", "pattern": "^step_[1-8]$"},
+                "action": {"type": "string", "const": definition.name},
+                "arguments": strict_arguments_schema(),
+                "reference": {"type": ["string", "null"], "maxLength": 500},
+                "result_of": {"type": ["string", "null"], "pattern": "^step_[1-8]$"},
+                "depends_on": {
+                    "type": "array", "maxItems": 7,
+                    "items": {"type": "string", "pattern": "^step_[1-8]$"},
+                },
+                "purpose": {"type": ["string", "null"], "maxLength": 500},
+            },
+            "required": [
+                "id", "action", "arguments", "reference", "result_of",
+                "depends_on", "purpose",
+            ],
+        })
+    return {"anyOf": variants}
+
+
 UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -146,6 +212,7 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 "action",
+                "plan",
                 "conversation",
                 "personal_context",
                 "clarification",
@@ -172,6 +239,13 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
         },
         "reason": {"type": ["string", "null"], "maxLength": 1000},
+        "steps": {
+            "type": ["array", "null"],
+            "minItems": 2,
+            "maxItems": 8,
+            "items": _model_plan_step_schema(),
+        },
+        "summary": {"type": ["string", "null"], "maxLength": 1000},
     },
     "required": [
         "kind",
@@ -183,6 +257,8 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
         "prompt",
         "candidates",
         "reason",
+        "steps",
+        "summary",
     ],
 }
 

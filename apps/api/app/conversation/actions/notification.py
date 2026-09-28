@@ -20,14 +20,14 @@ DEFINITIONS = (
         name="notification.list", description="List visible notifications, optionally unread only.",
         arguments=NotificationListArgs, mode=ActionMode.READ, risk=RiskLevel.READ,
         confirmation=ConfirmationPolicy.NONE, reference=ReferencePolicy.NONE,
-        reference_kind=None, requires_world=False, grounder=ActionDomain.NOTIFICATION,
+        reference_kind=None, result_kind=None, requires_world=False, grounder=ActionDomain.NOTIFICATION,
         executor=ExecutorKey.NOTIFICATION_LIST,
     ),
     ActionDefinition(
         name="notification.read", description="Mark one owned notification read.",
         arguments=NotificationStateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.LOW_RISK_WRITE, confirmation=ConfirmationPolicy.NONE,
-        reference=ReferencePolicy.OPTIONAL, reference_kind="notification",
+        reference=ReferencePolicy.OPTIONAL, reference_kind="notification", result_kind="notification",
         requires_world=True, grounder=ActionDomain.NOTIFICATION, executor=ExecutorKey.NOTIFICATION_READ,
     ),
     ActionDefinition(
@@ -35,7 +35,7 @@ DEFINITIONS = (
         arguments=NotificationStateArgs, mode=ActionMode.MUTATION,
         risk=RiskLevel.DESTRUCTIVE_OR_REVERSAL,
         confirmation=ConfirmationPolicy.PLAN_STEP,
-        reference=ReferencePolicy.OPTIONAL, reference_kind="notification",
+        reference=ReferencePolicy.OPTIONAL, reference_kind="notification", result_kind="notification",
         requires_world=True, grounder=ActionDomain.NOTIFICATION, executor=ExecutorKey.NOTIFICATION_DISMISS,
     ),
 )
