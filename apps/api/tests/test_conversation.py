@@ -1969,6 +1969,87 @@ async def test_deterministic_private_capability_takes_priority_over_live(ctx) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_action"),
+    [
+        ("What are my current tasks?", "task.list"),
+        ("What's my latest project?", "project.list"),
+        ("What do I have today?", None),
+        ("What are my reminders today?", "reminder.list"),
+        ("Show my latest notes.", "note.list"),
+        ("What are my current projects?", "project.list"),
+    ],
+)
+async def test_ci5a_personal_freshness_never_executes_public_live_provider(
+    ctx, message: str, expected_action: str | None
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Safe personal understanding path.")
+    )
+    live = _use_fake_live_service(
+        LiveLookupResult(
+            "web.search",
+            None,
+            error_code="should_not_run",
+            error_message="Public live provider must not run.",
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation", json={"message": message}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == expected_action
+    assert live.executed == []
+    if expected_action is None:
+        assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ci5a_personal_pronoun_does_not_block_grounded_live_weather(ctx) -> None:
+    live = _use_fake_live_service(
+        LiveLookupResult(
+            "weather.current",
+            WeatherReport(
+                location="Current location",
+                window="current",
+                temperature_c=27.0,
+                source=SourceMetadata(
+                    provider="fake-weather",
+                    retrieved_at=datetime.now(timezone.utc),
+                    freshness="test",
+                ),
+            ),
+        )
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={
+            "message": "What's the weather near my location?",
+            "location_context": {
+                "latitude": 17.385,
+                "longitude": 78.487,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "weather.current"
+    assert len(live.executed) == 1
+    intent = live.executed[0]
+    assert intent.arguments["latitude"] == 17.385
+    assert intent.arguments["longitude"] == 78.487
+
+
+@pytest.mark.asyncio
 async def test_multilingual_follow_up_carries_language_and_bounded_subject(ctx) -> None:
     first_provider = _use_fake_provider(
         ConversationTurn(

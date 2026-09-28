@@ -71,6 +71,7 @@ PROJECT_LIST_CUES: tuple[str, ...] = (
     "what am i working on",
     "what's going on",
     "whats going on",
+    "my latest project",
     "my projects",
     "list projects",
     "projects",
@@ -88,6 +89,7 @@ ACTIVE_TASK_CUES: tuple[str, ...] = (
     "what do i have to do",
     "what do i need to do",
     "what tasks do i have",
+    "my current tasks",
 )
 ACTIVITY_RECALL_CUES: tuple[str, ...] = (
     "what did i do",
@@ -295,7 +297,13 @@ class HardcodedResolver:
 
         if any(
             cue in text
-            for cue in ("show my notes", "show notes", "list notes", "my notes")
+            for cue in (
+                "show my notes",
+                "show my latest notes",
+                "show notes",
+                "list notes",
+                "my notes",
+            )
         ):
             return ResolvedAction(
                 action=registry.NOTE_LIST,

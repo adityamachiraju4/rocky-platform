@@ -104,6 +104,65 @@ def test_evergreen_question_has_no_live_intent() -> None:
     assert resolve_live_intent("What is photosynthesis?") is None
 
 
+@pytest.mark.parametrize(
+    ("message", "tool_name"),
+    [
+        ("What's the weather in Hyderabad today?", registry.WEATHER_FORECAST),
+        ("What's the weather tomorrow in Hyderabad?", registry.WEATHER_FORECAST),
+        ("What time is it in Tokyo?", registry.TIME_LOOKUP),
+        ("What's the latest OpenAI news?", registry.NEWS_SEARCH),
+        ("What's the current NVDA price?", registry.MARKET_QUOTE),
+        ("What's Bitcoin trading at?", registry.CRYPTO_QUOTE),
+        ("What's the score?", registry.SPORTS_LOOKUP),
+        ("Find coffee shops near me.", registry.PLACES_SEARCH),
+    ],
+)
+def test_ci5a_explicit_live_requests_keep_live_routes(
+    message: str, tool_name: str
+) -> None:
+    intent = resolve_live_intent(message)
+
+    assert intent is not None
+    assert intent.tool_name == tool_name
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What is Bitcoin?",
+        "Explain Bitcoin.",
+        "How does weather forecasting work?",
+        "Explain inflation.",
+        "What is a stock split?",
+        "What is football?",
+        "Explain the Premier League format.",
+        "What is NVIDIA?",
+        "What does today mean?",
+    ],
+)
+def test_ci5a_evergreen_questions_do_not_become_live_intents(
+    message: str,
+) -> None:
+    assert resolve_live_intent(message) is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What are my current tasks?",
+        "What's my latest project?",
+        "What do I have today?",
+        "What are my reminders today?",
+        "Show my latest notes.",
+        "What are my current projects?",
+    ],
+)
+def test_ci5a_personal_freshness_language_is_not_a_public_live_intent(
+    message: str,
+) -> None:
+    assert resolve_live_intent(message) is None
+
+
 def test_live_unconfigured_error_is_user_friendly() -> None:
     reply = render_live_result(
         LiveLookupResult(

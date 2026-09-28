@@ -6,7 +6,16 @@ from dataclasses import dataclass
 
 from app.live import registry
 
-_WEATHER_RE = re.compile(r"\b(weather|temperature|forecast|rain|raining)\b", re.I)
+_WEATHER_RE = re.compile(
+    r"\bwhat(?:'s| is)\s+(?:the\s+)?(?:weather|temperature|forecast)\b|"
+    r"\b(?:weather|temperature|forecast)\s+"
+    r"(?:in|at|near|for|today|tonight|tomorrow|now|current)\b|"
+    r"\b(?:today(?:'s)?|tonight(?:'s)?|tomorrow(?:'s)?|current)\s+"
+    r"(?:weather|temperature|forecast)\b|"
+    r"\b(?:is it raining|will it rain|rain(?:ing)?\s+"
+    r"(?:today|tonight|tomorrow|now))\b",
+    re.I,
+)
 _NEWS_RE = re.compile(
     r"\b(?:latest|today(?:'s)?|current|happening|happened)\b.*\b(?:news|events?|india|ai|cybersecurity)\b|"
     r"\b(?:latest|today(?:'s)?|current)\s+(?:ai|cybersecurity|india)\s+news\b|"
@@ -14,7 +23,13 @@ _NEWS_RE = re.compile(
     re.I,
 )
 _MARKET_RE = re.compile(
-    r"\b(?:stock price|trading at|bitcoin|btc|crypto|market doing|markets?|quote)\b",
+    r"\b(?:stock price|trading at|market doing|quote)\b|"
+    r"\b(?:current|latest|today(?:'s)?|now)\b.{0,80}"
+    r"\b(?:price|markets?|stocks?|bitcoin|btc|crypto)\b|"
+    r"\b(?:price|markets?|stocks?|bitcoin|btc|crypto)\b.{0,80}"
+    r"\b(?:current|latest|today(?:'s)?|now)\b|"
+    r"\bmarkets?\b.*\b(?:open|closed)\b|"
+    r"\bhow (?:is|are) (?:the )?markets?\b",
     re.I,
 )
 _SPORTS_RE = re.compile(r"\b(?:score|match|won|fixture|standings|game)\b", re.I)
@@ -23,7 +38,18 @@ _PLACES_RE = re.compile(
 )
 _TIME_RE = re.compile(r"\b(?:what time|time in|date in|timezone)\b", re.I)
 _WEB_CURRENT_RE = re.compile(
-    r"\b(?:current|latest|newest|new version|latest version|is .* down|ceo of)\b",
+    r"\bcurrent\s+(?:ceo|president|version|release|status)\b|"
+    r"\b(?:latest|newest)\s+(?:on|about|version|release|update|news)\b|"
+    r"\bnew version\b|\blatest version\b|\bis .* down\b|\bceo of\b",
+    re.I,
+)
+
+_PRIVATE_OWNERSHIP_RE = re.compile(
+    r"\b(?:my|mine)\b|\b(?:do|did)\s+i\s+have\b|\bfor me\b",
+    re.I,
+)
+_PRIVATE_DOMAIN_RE = re.compile(
+    r"\b(?:tasks?|projects?|reminders?|notes?|lists?|notifications?)\b",
     re.I,
 )
 
@@ -57,6 +83,9 @@ class LiveIntent:
 
 def resolve_live_intent(message: str) -> LiveIntent | None:
     text = message.strip()
+    if _looks_like_private_domain_request(text):
+        return None
+
     if _WEATHER_RE.search(text):
         location = _extract_location(text)
         if location is None:
@@ -107,6 +136,14 @@ def resolve_live_intent(message: str) -> LiveIntent | None:
         )
 
     return None
+
+
+def _looks_like_private_domain_request(text: str) -> bool:
+    """Keep Rocky-owned nouns private when freshness words are incidental."""
+
+    return bool(
+        _PRIVATE_OWNERSHIP_RE.search(text) and _PRIVATE_DOMAIN_RE.search(text)
+    )
 
 
 def _extract_location(text: str) -> str | None:
