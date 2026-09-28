@@ -36,6 +36,7 @@ class DurableReference:
     entity_id: uuid.UUID | None
     display_text: str
     metadata: dict[str, Any]
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ class ConversationContextStore:
                 row.entity_id,
                 row.display_text,
                 dict(row.reference_metadata or {}),
+                row.updated_at,
             )
             for row in rows
         }

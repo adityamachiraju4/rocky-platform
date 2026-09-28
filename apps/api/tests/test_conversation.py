@@ -50,7 +50,10 @@ from app.notifications.schemas import NotificationCreate
 from app.notifications.service import NotificationsService
 from app.models.user import User
 from app.models.conversation import (
-    ConversationThread, ConversationTurnRecord, PendingConversationPlan,
+    ConversationThread,
+    ConversationTurnRecord,
+    GroundedReference,
+    PendingConversationPlan,
 )
 from app.conversation.context import (
     MAX_STORED_TURNS,
@@ -90,7 +93,16 @@ from app.conversation.plans.store import (
 )
 from app.live.dependencies import get_live_intelligence_service
 from app.live.service import LiveLookupResult
-from app.live.schemas import SourceMetadata, WeatherReport
+from app.live.schemas import (
+    MarketQuote,
+    PlaceResult,
+    PlacesReport,
+    SourceMetadata,
+    SportsEvent,
+    SportsReport,
+    TimeReport,
+    WeatherReport,
+)
 from app.intelligence.decision import (
     ConfirmationDecision,
     ConfirmationKind,
@@ -179,14 +191,16 @@ def _use_fake_provider(
 
 
 class _FakeLiveService:
-    def __init__(self, result: LiveLookupResult | None) -> None:
-        self._result = result
+    def __init__(
+        self, result: LiveLookupResult | list[LiveLookupResult] | None
+    ) -> None:
+        self._results = result if isinstance(result, list) else [result]
         self.resolved: list[str] = []
         self.executed: list[object] = []
 
     def resolve(self, message: str) -> object | None:
         self.resolved.append(message)
-        if self._result is None:
+        if self._results[0] is None:
             return None
         from app.live.intent import resolve_live_intent
 
@@ -194,16 +208,120 @@ class _FakeLiveService:
 
     async def execute(self, intent: object) -> LiveLookupResult:
         self.executed.append(intent)
-        assert self._result is not None
-        return self._result
+        result = self._results[min(len(self.executed) - 1, len(self._results) - 1)]
+        assert result is not None
+        return result
 
 
-def _use_fake_live_service(result: LiveLookupResult | None) -> _FakeLiveService:
+def _use_fake_live_service(
+    result: LiveLookupResult | list[LiveLookupResult] | None,
+) -> _FakeLiveService:
     service = _FakeLiveService(result)
     fastapi_app.dependency_overrides[get_live_intelligence_service] = (
         lambda: service
     )
     return service
+
+
+def _live_source(provider: str) -> SourceMetadata:
+    return SourceMetadata(
+        provider=provider,
+        retrieved_at=datetime.now(timezone.utc),
+        freshness="test",
+    )
+
+
+def _weather_lookup(
+    *,
+    tool: str = "weather.current",
+    location: str = "Hyderabad, India",
+    window: str = "current",
+) -> LiveLookupResult:
+    return LiveLookupResult(
+        tool,
+        WeatherReport(
+            location=location,
+            window=window,
+            temperature_c=28.0,
+            source=_live_source("fake-weather"),
+        ),
+    )
+
+
+def _places_lookup() -> LiveLookupResult:
+    return LiveLookupResult(
+        "places.search",
+        PlacesReport(
+            query="coffee",
+            location="Current location",
+            places=(PlaceResult(name="Coffee House", address="Nearby"),),
+            source=_live_source("fake-places"),
+        ),
+    )
+
+
+def _market_lookup(
+    *,
+    tool: str = "market.quote",
+    symbol: str = "NVDA",
+    asset_type: str = "stock",
+) -> LiveLookupResult:
+    return LiveLookupResult(
+        tool,
+        MarketQuote(
+            symbol=symbol,
+            asset_type=asset_type,
+            price=100_000,
+            currency="USD",
+            source=_live_source("fake-market"),
+        ),
+    )
+
+
+def _crypto_lookup() -> LiveLookupResult:
+    return _market_lookup(tool="crypto.quote", symbol="BTC", asset_type="crypto")
+
+
+def _sports_lookup() -> LiveLookupResult:
+    return LiveLookupResult(
+        "sports.lookup",
+        SportsReport(
+            query="What's the score for Arsenal",
+            events=(SportsEvent(name="Arsenal match", score="2-1"),),
+            source=_live_source("fake-sports"),
+        ),
+    )
+
+
+def _time_lookup(location: str = "Tokyo") -> LiveLookupResult:
+    return LiveLookupResult(
+        "time.lookup",
+        TimeReport(
+            location=location,
+            timezone="Asia/Tokyo" if location == "Tokyo" else "Asia/Kolkata",
+            local_time=datetime.now(timezone.utc),
+            source=_live_source("fake-time"),
+        ),
+    )
+
+
+async def _reference_for_user(
+    sessionmaker: async_sessionmaker,
+    user_id: str,
+    kind: str,
+) -> GroundedReference | None:
+    async with sessionmaker() as session:
+        return await session.scalar(
+            select(GroundedReference)
+            .join(
+                ConversationThread,
+                ConversationThread.id == GroundedReference.thread_id,
+            )
+            .where(
+                ConversationThread.user_id == uuid.UUID(user_id),
+                GroundedReference.kind == kind,
+            )
+        )
 
 
 class _FakeResponses:
@@ -2047,6 +2165,589 @@ async def test_ci5a_personal_pronoun_does_not_block_grounded_live_weather(ctx) -
     intent = live.executed[0]
     assert intent.arguments["latitude"] == 17.385
     assert intent.arguments["longitude"] == 78.487
+
+
+# --------------------------------------------------------------------------
+# CI-5B durable live follow-up continuity.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_weather_follow_up_inherits_location_and_overrides_window(ctx) -> None:
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(),
+            _weather_lookup(tool="weather.forecast", window="tomorrow"),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    first = await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=headers,
+    )
+
+    assert first.json()["action"] == "weather.current"
+    assert follow_up.json()["action"] == "weather.forecast"
+    assert len(live.executed) == 2
+    intent = live.executed[1]
+    assert intent.arguments == {"location": "Hyderabad", "window": "tomorrow"}
+
+
+@pytest.mark.asyncio
+async def test_weather_follow_up_explicit_location_updates_durable_context(ctx) -> None:
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(),
+            _weather_lookup(location="Bangalore, India"),
+            _weather_lookup(
+                tool="weather.forecast",
+                location="Bangalore, India",
+                window="tomorrow",
+            ),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    for message in (
+        "What's the weather in Hyderabad?",
+        "How about Bangalore?",
+        "What about tomorrow?",
+    ):
+        response = await client.post(
+            "/conversation", json={"message": message}, headers=headers
+        )
+        assert response.status_code == 200, response.text
+
+    assert len(live.executed) == 3
+    assert live.executed[1].arguments == {
+        "location": "Bangalore",
+        "window": "current",
+    }
+    assert live.executed[2].arguments == {
+        "location": "Bangalore",
+        "window": "tomorrow",
+    }
+
+
+@pytest.mark.asyncio
+async def test_device_location_follow_up_uses_current_coordinates_but_persists_none(
+    ctx,
+) -> None:
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(location="Current location"),
+            _weather_lookup(
+                tool="weather.forecast",
+                location="Current location",
+                window="tomorrow",
+            ),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={
+            "message": "What's the weather near my location?",
+            "location_context": {
+                "latitude": 17.385,
+                "longitude": 78.487,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={
+            "message": "What about tomorrow?",
+            "location_context": {
+                "latitude": 12.972,
+                "longitude": 77.595,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "weather.forecast"
+    assert live.executed[1].arguments["latitude"] == 12.972
+    assert live.executed[1].arguments["longitude"] == 77.595
+    reference = await _reference_for_user(sessionmaker, user_id, "live_subject")
+    assert reference is not None
+    assert reference.reference_metadata == {
+        "tool": "weather.forecast",
+        "category": "weather",
+        "location": "Current location",
+        "window": "tomorrow",
+    }
+
+
+@pytest.mark.asyncio
+async def test_places_follow_up_reuses_query_and_current_device_location(ctx) -> None:
+    live = _use_fake_live_service([_places_lookup(), _places_lookup()])
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={
+            "message": "Find coffee shops near me.",
+            "location_context": {
+                "latitude": 17.385,
+                "longitude": 78.487,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={
+            "message": "Show me another one nearby.",
+            "location_context": {
+                "latitude": 12.972,
+                "longitude": 77.595,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "places.search"
+    assert live.executed[1].arguments["query"] == "coffee"
+    assert live.executed[1].arguments["latitude"] == 12.972
+    assert live.executed[1].arguments["longitude"] == 77.595
+    reference = await _reference_for_user(sessionmaker, user_id, "place")
+    assert reference is not None
+    assert reference.reference_metadata == {
+        "tool": "places.search",
+        "category": "places",
+        "query": "coffee",
+        "location": "Current location",
+    }
+
+
+@pytest.mark.asyncio
+async def test_newer_places_context_does_not_resurrect_older_weather_context(ctx) -> None:
+    live = _use_fake_live_service([_weather_lookup(), _places_lookup()])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    await client.post(
+        "/conversation",
+        json={
+            "message": "Find coffee shops near me.",
+            "location_context": {
+                "latitude": 17.385,
+                "longitude": 78.487,
+                "source": "native",
+            },
+        },
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] is None
+    assert len(live.executed) == 2
+
+
+@pytest.mark.asyncio
+async def test_crypto_price_follow_up_inherits_symbol_without_spy_default(ctx) -> None:
+    live = _use_fake_live_service([_crypto_lookup(), _crypto_lookup()])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's Bitcoin trading at?"},
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What's the price now?"},
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "crypto.quote"
+    assert live.executed[1].tool_name == "crypto.quote"
+    assert live.executed[1].arguments == {
+        "symbol": "BTC",
+        "asset_type": "crypto",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stock_price_follow_up_inherits_canonical_symbol(ctx) -> None:
+    live = _use_fake_live_service([_market_lookup(), _market_lookup()])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the current NVDA price?"},
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What's the price now?"},
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "market.quote"
+    assert live.executed[1].arguments == {
+        "symbol": "NVDA",
+        "asset_type": "stock",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sports_team_follow_up_reuses_grounded_query(ctx) -> None:
+    live = _use_fake_live_service([_sports_lookup(), _sports_lookup()])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the score for Arsenal?"},
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What about that team?"},
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "sports.lookup"
+    assert live.executed[1].arguments == {
+        "query": "What's the score for Arsenal",
+        "lookup": "latest",
+        "max_results": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_time_follow_up_can_override_location(ctx) -> None:
+    live = _use_fake_live_service([_time_lookup(), _time_lookup("Bangalore")])
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What time is it in Tokyo?"},
+        headers=headers,
+    )
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "How about Bangalore?"},
+        headers=headers,
+    )
+
+    assert follow_up.json()["action"] == "time.lookup"
+    assert live.executed[1].arguments == {"location": "Bangalore"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "reply_fragment"),
+    [
+        ("What about tomorrow?", "which live topic"),
+        ("What's the price now?", "which stock or cryptocurrency"),
+        ("What about that team?", "which team"),
+        ("Show me another one nearby.", "what kind of place"),
+    ],
+)
+async def test_vague_live_follow_up_without_context_clarifies_without_provider(
+    ctx, message: str, reply_fragment: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Model must not invent context.")
+    )
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": message},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] is None
+    assert reply_fragment in response.json()["reply"].lower()
+    assert live.executed == []
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_context_never_steals_private_or_explicit_recall_routes(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Safe personal route.")
+    )
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    tasks = await client.post(
+        "/conversation",
+        json={"message": "What are my tasks tomorrow?"},
+        headers=headers,
+    )
+    recall = await client.post(
+        "/conversation",
+        json={"message": "What did I do yesterday?"},
+        headers=headers,
+    )
+
+    assert tasks.json()["action"] is None
+    assert recall.json()["action"] == "activity.recall"
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_standalone_lookup_does_not_replace_successful_live_context(
+    ctx,
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Must not answer live data.")
+    )
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(),
+            LiveLookupResult(
+                "weather.current",
+                None,
+                error_code="provider_timeout",
+                error_message="Weather provider timed out.",
+            ),
+            _weather_lookup(tool="weather.forecast", window="tomorrow"),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    failed = await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Tokyo?"},
+        headers=headers,
+    )
+    reference = await _reference_for_user(sessionmaker, user_id, "live_subject")
+    follow_up = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=headers,
+    )
+
+    assert "quickly enough" in failed.json()["reply"]
+    assert reference is not None
+    assert reference.reference_metadata["location"] == "Hyderabad"
+    assert follow_up.json()["action"] == "weather.forecast"
+    assert live.executed[2].arguments["location"] == "Hyderabad"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_live_follow_up_is_terminal_and_preserves_previous_context(ctx) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Must not answer live data.")
+    )
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(),
+            LiveLookupResult(
+                "weather.forecast",
+                None,
+                error_code="provider_timeout",
+                error_message="Weather provider timed out.",
+            ),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    failed = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=headers,
+    )
+    reference = await _reference_for_user(sessionmaker, user_id, "live_subject")
+
+    assert failed.json()["action"] == "weather.forecast"
+    assert "quickly enough" in failed.json()["reply"]
+    assert reference is not None
+    assert reference.reference_metadata["window"] == "current"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_follow_up_context_is_thread_scoped(ctx) -> None:
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+    first = await client.post(
+        "/conversation/threads", json={"title": "Weather"}, headers=headers
+    )
+    second = await client.post(
+        "/conversation/threads", json={"title": "Separate"}, headers=headers
+    )
+
+    await client.post(
+        "/conversation",
+        json={
+            "message": "What's the weather in Hyderabad?",
+            "thread_id": first.json()["id"],
+        },
+        headers=headers,
+    )
+    isolated = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?", "thread_id": second.json()["id"]},
+        headers=headers,
+    )
+
+    assert isolated.json()["action"] is None
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_follow_up_context_is_user_scoped(ctx) -> None:
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    owner_headers, _ = await _auth_headers(client, sessionmaker)
+    other_headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=owner_headers,
+    )
+    isolated = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=other_headers,
+    )
+
+    assert isolated.json()["action"] is None
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_live_reference_is_not_used_for_follow_up(ctx) -> None:
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    reference = await _reference_for_user(sessionmaker, user_id, "live_subject")
+    assert reference is not None
+    async with sessionmaker() as session:
+        await session.execute(
+            update(GroundedReference)
+            .where(GroundedReference.id == reference.id)
+            .values(updated_at=datetime.now(timezone.utc) - timedelta(hours=25))
+        )
+        await session.commit()
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What about tomorrow?"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] is None
+    assert "which live topic" in response.json()["reply"].lower()
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_yesterday_follow_up_does_not_become_activity_recall(ctx) -> None:
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad?"},
+        headers=headers,
+    )
+    response = await client.post(
+        "/conversation",
+        json={"message": "What about yesterday?"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] is None
+    assert "historical weather" in response.json()["reply"].lower()
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_follow_up_skips_worldview_and_jev(
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    live = _FakeLiveService(
+        [_weather_lookup(), _weather_lookup(tool="weather.forecast", window="tomorrow")]
+    )
+    decisions = _FakeDecisionProvider()
+
+    async def _unexpected_world(*_args: object, **_kwargs: object) -> WorldView:
+        raise AssertionError("live follow-up must not load WorldView")
+
+    monkeypatch.setattr(ConversationService, "_build_world", _unexpected_world)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            live_service=live,
+            decision_provider=decisions,
+        )
+        await service.handle(user, "What's the weather in Hyderabad?")
+        response = await service.handle(user, "What about tomorrow?")
+
+    assert response.action == "weather.forecast"
+    assert decisions.route_calls == []
 
 
 @pytest.mark.asyncio

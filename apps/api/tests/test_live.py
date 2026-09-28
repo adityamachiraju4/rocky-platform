@@ -7,7 +7,12 @@ import pytest
 
 from app.live import registry
 from app.live.errors import LiveMalformedResult, LiveProviderTimeout, LiveUnsupportedRequest
-from app.live.intent import LiveIntent, resolve_live_intent
+from app.live.intent import (
+    LiveIntent,
+    canonical_live_reference,
+    resolve_live_follow_up,
+    resolve_live_intent,
+)
 from app.live.providers.time_provider import LocalTimeProvider
 from app.live.responder import render_live_result
 from app.live.schemas import (
@@ -161,6 +166,65 @@ def test_ci5a_personal_freshness_language_is_not_a_public_live_intent(
     message: str,
 ) -> None:
     assert resolve_live_intent(message) is None
+
+
+def test_live_reference_metadata_is_canonical_and_omits_coordinates() -> None:
+    display_text, metadata = canonical_live_reference(
+        LiveIntent(
+            registry.WEATHER_FORECAST,
+            {
+                "location": "Current location",
+                "window": "tomorrow",
+                "latitude": 17.385,
+                "longitude": 78.487,
+            },
+        )
+    )
+
+    assert display_text == "Current location"
+    assert metadata == {
+        "tool": registry.WEATHER_FORECAST,
+        "category": "weather",
+        "location": "Current location",
+        "window": "tomorrow",
+    }
+
+
+@pytest.mark.asyncio
+async def test_follow_up_intent_still_uses_strict_live_service_validation() -> None:
+    resolution = resolve_live_follow_up(
+        "What about tomorrow?",
+        live_subject={
+            "tool": registry.WEATHER_CURRENT,
+            "category": "weather",
+            "location": "Hyderabad",
+            "window": "current",
+        },
+        place=None,
+    )
+    provider = _WeatherProvider(_weather_report())
+    service = LiveIntelligenceService(weather_provider=provider)
+
+    assert resolution is not None
+    assert resolution.intent is not None
+    result = await service.execute(resolution.intent)
+
+    assert result.succeeded is True
+    assert provider.calls == [
+        WeatherArgs(location="Hyderabad", window="tomorrow")
+    ]
+
+
+def test_incomplete_legacy_live_context_clarifies_instead_of_inventing_args() -> None:
+    resolution = resolve_live_follow_up(
+        "What about tomorrow?",
+        live_subject={"tool": registry.WEATHER_CURRENT},
+        place=None,
+    )
+
+    assert resolution is not None
+    assert resolution.intent is None
+    assert resolution.clarification == "Which location do you mean for the weather?"
 
 
 def test_live_unconfigured_error_is_user_friendly() -> None:

@@ -57,7 +57,11 @@ from app.lists.service import ListsService
 from app.live import registry as live_registry
 from app.live.responder import render_live_result
 from app.live.service import LiveIntelligenceService
-from app.live.intent import LiveIntent
+from app.live.intent import (
+    LiveIntent,
+    canonical_live_reference,
+    resolve_live_follow_up,
+)
 
 from app.conversation import registry
 from app.conversation.actions.base import (
@@ -257,6 +261,8 @@ ACTION_EXECUTOR_METHODS: dict[ExecutorKey, str] = {
 class ConversationService:
     """Orchestrates one conversational turn over the peer capabilities."""
 
+    _LIVE_REFERENCE_MAX_AGE = timedelta(hours=24)
+
     def __init__(
         self,
         session: AsyncSession,
@@ -447,18 +453,6 @@ class ConversationService:
             display_text=response.reply[:2000],
             metadata={"message": message[:2000], "language": response.language},
         )
-        if response.action and response.action.startswith(
-            ("weather.", "news.", "web.", "market.", "crypto.",
-             "sports.", "places.", "time.")
-        ):
-            kind = "place" if response.action == live_registry.PLACES_SEARCH else "live_subject"
-            await self._context_store.set_reference(
-                thread.id,
-                kind=kind,
-                entity_id=None,
-                display_text=message,
-                metadata={"tool": response.action},
-            )
         return response
 
     _CONFIRMATIONS = frozenset({"yes", "confirm", "go ahead", "proceed", "yes, proceed"})
@@ -697,15 +691,50 @@ class ConversationService:
         except NoMatchError:
             if self._live_service is not None:
                 live_intent = self._live_service.resolve(message)
+                routing_source = "standalone"
+                if live_intent is None:
+                    live_reference = self._fresh_live_reference("live_subject")
+                    place_reference = self._fresh_live_reference("place")
+                    follow_up = resolve_live_follow_up(
+                        message,
+                        live_subject=(
+                            live_reference.metadata if live_reference else None
+                        ),
+                        place=(place_reference.metadata if place_reference else None),
+                    )
+                    if follow_up is not None and follow_up.clarification:
+                        logger.info(
+                            "live_followup_ambiguous",
+                            extra={
+                                "live_category": follow_up.category,
+                                "routing_source": "durable_reference",
+                            },
+                        )
+                        return ConversationResponse(
+                            executed=False,
+                            thread_id=self._current_thread_id,
+                            reply=follow_up.clarification,
+                            language=turn_language,
+                        )
+                    if follow_up is not None:
+                        live_intent = follow_up.intent
+                        routing_source = "durable_reference"
+                        if live_intent is not None:
+                            logger.info(
+                                "live_followup_resolved",
+                                extra={
+                                    "live_tool": live_intent.tool_name,
+                                    "live_category": follow_up.category,
+                                    "routing_source": routing_source,
+                                    "context_inherited": True,
+                                    "explicit_override": follow_up.explicit_override,
+                                },
+                            )
                 if live_intent is not None:
-                    live_intent = _with_location_context(live_intent, location_context)
-                    live_result = await self._live_service.execute(live_intent)
-                    return ConversationResponse(
-                        executed=False,
-                        thread_id=self._current_thread_id,
-                        action=live_result.tool_name,
-                        reply=render_live_result(live_result),
-                        language=turn_language,
+                    return await self._execute_live_intent(
+                        live_intent,
+                        location_context=location_context,
+                        turn_language=turn_language,
                     )
             live_category = (
                 live_information_category(message)
@@ -803,6 +832,47 @@ class ConversationService:
         )
         await self._remember_outcome(outcome)
         return self._respond(outcome, turn_language)
+
+    async def _execute_live_intent(
+        self,
+        intent: LiveIntent,
+        *,
+        location_context: LocationContext | None,
+        turn_language: str,
+    ) -> ConversationResponse:
+        assert self._live_service is not None
+        resolved_intent = _with_location_context(intent, location_context)
+        result = await self._live_service.execute(resolved_intent)
+        if result.succeeded:
+            await self._remember_live_intent(resolved_intent)
+        return ConversationResponse(
+            executed=False,
+            thread_id=self._current_thread_id,
+            action=result.tool_name,
+            reply=render_live_result(result),
+            language=turn_language,
+        )
+
+    async def _remember_live_intent(self, intent: LiveIntent) -> None:
+        display_text, metadata = canonical_live_reference(intent)
+        await self._context_store.set_reference(
+            self._current_thread_id,
+            kind="live_subject",
+            entity_id=None,
+            display_text=display_text,
+            metadata=metadata,
+        )
+        if intent.tool_name == live_registry.PLACES_SEARCH:
+            await self._context_store.set_reference(
+                self._current_thread_id,
+                kind="place",
+                entity_id=None,
+                display_text=display_text,
+                metadata=metadata,
+            )
+        self._current_references = await self._context_store.references(
+            self._current_thread_id
+        )
 
     async def _try_provider(
         self,
@@ -2252,6 +2322,16 @@ class ConversationService:
             self, "_current_references", {}
         )
         return references.get(kind)
+
+    def _fresh_live_reference(self, kind: str) -> DurableReference | None:
+        reference = self._durable_reference(kind)
+        if reference is None:
+            return None
+        updated_at = reference.updated_at
+        if updated_at.tzinfo is None or updated_at.utcoffset() is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        age = ensure_utc(self._clock.now()) - updated_at.astimezone(timezone.utc)
+        return reference if age <= self._LIVE_REFERENCE_MAX_AGE else None
 
     async def _remember_outcome(self, outcome: Outcome) -> None:
         if not outcome.reference_kind or not outcome.reference_label:

@@ -107,7 +107,8 @@ ACTIVITY_RECALL_CUES: tuple[str, ...] = (
 YESTERDAY_RECALL_CUES: tuple[str, ...] = (
     "what did i do yesterday",
     "what happened yesterday",
-    "yesterday",
+    "what was i working on yesterday",
+    "what were we working on yesterday",
 )
 
 
