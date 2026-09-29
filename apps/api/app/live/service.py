@@ -9,7 +9,12 @@ from pydantic import ValidationError
 
 from app.live import registry
 from app.live.errors import LiveError, LiveProviderUnavailable, LiveUnsupportedRequest
-from app.live.intent import LiveIntent, resolve_live_intent
+from app.live.intent import (
+    LiveIntent,
+    LiveRequestResolution,
+    resolve_live_intent,
+    resolve_live_request,
+)
 from app.live.providers.base import (
     MarketProvider,
     NewsProvider,
@@ -29,6 +34,7 @@ from app.live.schemas import (
     WeatherArgs,
     WebSearchArgs,
 )
+from app.live.temporal import TemporalInterpretation
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,14 @@ class LiveIntelligenceService:
 
     def resolve(self, message: str) -> LiveIntent | None:
         return resolve_live_intent(message)
+
+    def resolve_request(
+        self,
+        message: str,
+        *,
+        temporal: TemporalInterpretation | None,
+    ) -> LiveRequestResolution | None:
+        return resolve_live_request(message, temporal=temporal)
 
     async def execute(self, intent: LiveIntent) -> LiveLookupResult:
         if not registry.is_allowed(intent.tool_name):

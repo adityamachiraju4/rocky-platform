@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.dependencies import get_session
+from app.core.time import FrozenClock
 from app.db.base import Base
 from app.main import app as fastapi_app
 from app.models.activity import Activity
@@ -103,6 +104,7 @@ from app.live.schemas import (
     TimeReport,
     WeatherReport,
 )
+from app.live.temporal import TemporalInterpretation
 from app.intelligence.decision import (
     ConfirmationDecision,
     ConfirmationKind,
@@ -196,6 +198,7 @@ class _FakeLiveService:
     ) -> None:
         self._results = result if isinstance(result, list) else [result]
         self.resolved: list[str] = []
+        self.temporals: list[object | None] = []
         self.executed: list[object] = []
 
     def resolve(self, message: str) -> object | None:
@@ -205,6 +208,17 @@ class _FakeLiveService:
         from app.live.intent import resolve_live_intent
 
         return resolve_live_intent(message)
+
+    def resolve_request(
+        self, message: str, *, temporal: object | None
+    ) -> object | None:
+        self.resolved.append(message)
+        self.temporals.append(temporal)
+        if self._results[0] is None:
+            return None
+        from app.live.intent import resolve_live_request
+
+        return resolve_live_request(message, temporal=temporal)
 
     async def execute(self, intent: object) -> LiveLookupResult:
         self.executed.append(intent)
@@ -2745,6 +2759,224 @@ async def test_live_follow_up_skips_worldview_and_jev(
         )
         await service.handle(user, "What's the weather in Hyderabad?")
         response = await service.handle(user, "What about tomorrow?")
+
+    assert response.action == "weather.forecast"
+    assert decisions.route_calls == []
+
+
+# --------------------------------------------------------------------------
+# CI-5C canonical temporal intelligence and capability compatibility.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "tool", "window"),
+    [
+        ("What's the weather in Hyderabad now?", "weather.current", "current"),
+        ("What's the weather in Hyderabad today?", "weather.forecast", "today"),
+        (
+            "What's the weather in Hyderabad tomorrow?",
+            "weather.forecast",
+            "tomorrow",
+        ),
+    ],
+)
+async def test_temporal_weather_request_uses_supported_window(
+    ctx, message: str, tool: str, window: str
+) -> None:
+    live = _use_fake_live_service(_weather_lookup(tool=tool, window=window))
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": message, "timezone": "Asia/Kolkata"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == tool
+    assert len(live.executed) == 1
+    assert live.executed[0].arguments == {
+        "location": "Hyderabad",
+        "window": window,
+    }
+
+
+@pytest.mark.asyncio
+async def test_historical_weather_request_is_terminal_without_live_execution(
+    ctx,
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Must not invent weather.")
+    )
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={
+            "message": "What was the weather in Hyderabad yesterday?",
+            "timezone": "Asia/Kolkata",
+        },
+        headers=headers,
+    )
+
+    assert response.json()["action"] is None
+    assert "historical weather" in response.json()["reply"].lower()
+    assert live.executed == []
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What was Bitcoin trading at yesterday?",
+        "What was NVDA trading at yesterday?",
+    ],
+)
+async def test_historical_market_request_never_executes_current_quote(
+    ctx, message: str
+) -> None:
+    provider = _use_fake_provider(
+        ConversationTurn(kind="conversation", reply="Must not invent a quote.")
+    )
+    live = _use_fake_live_service(_crypto_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": message, "timezone": "Asia/Kolkata"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] is None
+    assert "historical" in response.json()["reply"].lower()
+    assert live.executed == []
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_temporal_follow_up_explicit_now_overrides_tomorrow(ctx) -> None:
+    live = _use_fake_live_service(
+        [
+            _weather_lookup(tool="weather.forecast", window="tomorrow"),
+            _weather_lookup(tool="weather.current", window="current"),
+        ]
+    )
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    await client.post(
+        "/conversation",
+        json={"message": "What's the weather in Hyderabad tomorrow?"},
+        headers=headers,
+    )
+    response = await client.post(
+        "/conversation",
+        json={"message": "What about now?"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == "weather.current"
+    assert live.executed[1].arguments == {
+        "location": "Hyderabad",
+        "window": "current",
+    }
+
+
+@pytest.mark.asyncio
+async def test_market_historical_follow_up_does_not_repeat_current_quote(ctx) -> None:
+    live = _use_fake_live_service(_crypto_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    current = await client.post(
+        "/conversation",
+        json={"message": "What's Bitcoin trading at now?"},
+        headers=headers,
+    )
+    historical = await client.post(
+        "/conversation",
+        json={"message": "What about yesterday?"},
+        headers=headers,
+    )
+
+    assert current.json()["action"] == "crypto.quote"
+    assert historical.json()["action"] is None
+    assert "not that time window" in historical.json()["reply"].lower()
+    assert len(live.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_personal_last_night_recall_is_not_claimed_by_live_routing(ctx) -> None:
+    live = _use_fake_live_service(_weather_lookup())
+    client, sessionmaker = ctx
+    headers, _ = await _auth_headers(client, sessionmaker)
+
+    response = await client.post(
+        "/conversation",
+        json={"message": "What was I working on last night?"},
+        headers=headers,
+    )
+
+    assert response.json()["action"] == "activity.recall"
+    assert live.executed == []
+
+
+@pytest.mark.asyncio
+async def test_temporal_routing_uses_injected_clock_and_user_timezone(ctx) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    live = _FakeLiveService(_weather_lookup(tool="weather.forecast", window="today"))
+    clock = FrozenClock(datetime(2026, 9, 28, 23, 30, tzinfo=timezone.utc))
+
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        user.timezone = "Asia/Kolkata"
+        service = ConversationService(session, live_service=live, clock=clock)
+        response = await service.handle(
+            user,
+            "What's the weather in Hyderabad today?",
+        )
+
+    assert response.action == "weather.forecast"
+    temporal = live.temporals[0]
+    assert isinstance(temporal, TemporalInterpretation)
+    assert temporal.local_date.isoformat() == "2026-09-29"
+    assert temporal.timezone == "Asia/Kolkata"
+
+
+@pytest.mark.asyncio
+async def test_standalone_temporal_live_route_skips_worldview_and_jev(
+    ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    live = _FakeLiveService(_weather_lookup(tool="weather.forecast", window="today"))
+    decisions = _FakeDecisionProvider()
+
+    async def _unexpected_world(*_args: object, **_kwargs: object) -> WorldView:
+        raise AssertionError("temporal live routing must not load WorldView")
+
+    monkeypatch.setattr(ConversationService, "_build_world", _unexpected_world)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        assert user is not None
+        service = ConversationService(
+            session,
+            live_service=live,
+            decision_provider=decisions,
+        )
+        response = await service.handle(
+            user,
+            "What's the weather in Hyderabad today?",
+            timezone_name="Asia/Kolkata",
+        )
 
     assert response.action == "weather.forecast"
     assert decisions.route_calls == []

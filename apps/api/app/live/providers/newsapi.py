@@ -26,7 +26,13 @@ class NewsApiProvider:
                         "q": args.query,
                         "pageSize": args.max_results,
                         "sortBy": "publishedAt",
-                        "from": (retrieved_at - timedelta(days=7)).date().isoformat(),
+                        "from": (
+                            args.published_after.isoformat()
+                            if args.published_after is not None
+                            else (retrieved_at - timedelta(days=7))
+                            .date()
+                            .isoformat()
+                        ),
                         "language": "en",
                     },
                 )

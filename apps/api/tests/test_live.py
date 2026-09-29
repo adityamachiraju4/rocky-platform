@@ -7,13 +7,16 @@ import pytest
 
 from app.live import registry
 from app.live.errors import LiveMalformedResult, LiveProviderTimeout, LiveUnsupportedRequest
+from app.core.time import FrozenClock
 from app.live.intent import (
     LiveIntent,
     canonical_live_reference,
     resolve_live_follow_up,
     resolve_live_intent,
+    resolve_live_request,
 )
 from app.live.providers.time_provider import LocalTimeProvider
+from app.live.providers.newsapi import NewsApiProvider
 from app.live.responder import render_live_result
 from app.live.schemas import (
     MarketArgs,
@@ -26,6 +29,7 @@ from app.live.schemas import (
     WeatherReport,
 )
 from app.live.service import LiveIntelligenceService, LiveLookupResult
+from app.live.temporal import interpret_temporal
 
 
 class _WeatherProvider:
@@ -103,6 +107,151 @@ def test_live_intent_routes_weather_news_market_time_and_web() -> None:
     assert resolve_live_intent("Who is the current CEO of X?").tool_name == (
         registry.WEB_SEARCH
     )
+
+
+_TEMPORAL_CLOCK = FrozenClock(
+    datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+)
+
+
+def _temporal(message: str):
+    return interpret_temporal(
+        message,
+        clock=_TEMPORAL_CLOCK,
+        timezone_name="Asia/Kolkata",
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "tool", "window"),
+    [
+        ("What's the weather in Hyderabad now?", registry.WEATHER_CURRENT, "current"),
+        ("What's the weather in Hyderabad today?", registry.WEATHER_FORECAST, "today"),
+        (
+            "What's the weather in Hyderabad tomorrow?",
+            registry.WEATHER_FORECAST,
+            "tomorrow",
+        ),
+    ],
+)
+def test_weather_temporal_requests_map_only_to_supported_windows(
+    message: str, tool: str, window: str
+) -> None:
+    resolution = resolve_live_request(message, temporal=_temporal(message))
+
+    assert resolution is not None and resolution.intent is not None
+    assert resolution.intent.tool_name == tool
+    assert resolution.intent.arguments == {
+        "location": "Hyderabad",
+        "window": window,
+    }
+
+
+def test_historical_weather_is_understood_but_not_executed_as_current() -> None:
+    message = "What was the weather in Hyderabad yesterday?"
+
+    resolution = resolve_live_request(message, temporal=_temporal(message))
+
+    assert resolution is not None
+    assert resolution.intent is None
+    assert "historical weather" in (resolution.clarification or "").lower()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What was Bitcoin trading at yesterday?",
+        "What was NVDA trading at yesterday?",
+        "What was NVDA at last night?",
+    ],
+)
+def test_historical_market_requests_do_not_become_current_quotes(message: str) -> None:
+    resolution = resolve_live_request(message, temporal=_temporal(message))
+
+    assert resolution is not None
+    assert resolution.intent is None
+    assert "historical" in (resolution.clarification or "").lower()
+
+
+def test_unsupported_sports_and_places_temporal_filters_are_truthful() -> None:
+    sports_message = "Who won last night?"
+    places_message = "Find coffee shops near me open right now."
+
+    sports = resolve_live_request(
+        sports_message, temporal=_temporal(sports_message)
+    )
+    places = resolve_live_request(
+        places_message, temporal=_temporal(places_message)
+    )
+
+    assert sports is not None and sports.intent is None
+    assert "historical sports" in (sports.clarification or "").lower()
+    assert places is not None and places.intent is None
+    assert "open-now" in (places.clarification or "").lower()
+
+
+def test_news_today_uses_canonical_boundary_without_persisting_it() -> None:
+    message = "What's today's AI news?"
+
+    resolution = resolve_live_request(message, temporal=_temporal(message))
+
+    assert resolution is not None and resolution.intent is not None
+    published_after = resolution.intent.arguments["published_after"]
+    assert isinstance(published_after, datetime)
+    assert published_after.isoformat() == "2026-09-28T00:00:00+05:30"
+    _, metadata = canonical_live_reference(resolution.intent)
+    assert metadata == {
+        "tool": registry.NEWS_SEARCH,
+        "category": "news",
+        "query": "AI",
+    }
+
+
+@pytest.mark.asyncio
+async def test_news_provider_applies_canonical_publication_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "articles": [
+                    {
+                        "title": "AI update",
+                        "source": {"name": "Example"},
+                    }
+                ]
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, *_args: object, **kwargs: object) -> _Response:
+            captured.update(kwargs)
+            return _Response()
+
+    monkeypatch.setattr(
+        "app.live.providers.newsapi.httpx.AsyncClient",
+        lambda **_kwargs: _Client(),
+    )
+    boundary = datetime.fromisoformat("2026-09-28T00:00:00+05:30")
+    provider = NewsApiProvider(api_key="secret", timeout_seconds=3.0)
+
+    await provider.search_news(
+        NewsArgs(query="AI", max_results=1, published_after=boundary)
+    )
+
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["from"] == boundary.isoformat()
 
 
 def test_evergreen_question_has_no_live_intent() -> None:

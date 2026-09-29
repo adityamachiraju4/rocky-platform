@@ -62,6 +62,7 @@ from app.live.intent import (
     canonical_live_reference,
     resolve_live_follow_up,
 )
+from app.live.temporal import interpret_temporal
 
 from app.conversation import registry
 from app.conversation.actions.base import (
@@ -690,7 +691,44 @@ class ConversationService:
             action = self._resolver.resolve(resolver_message, empty_world)
         except NoMatchError:
             if self._live_service is not None:
-                live_intent = self._live_service.resolve(message)
+                temporal = interpret_temporal(
+                    message,
+                    clock=self._clock,
+                    timezone_name=timezone_name or current_user.timezone,
+                )
+                live_request = self._live_service.resolve_request(
+                    message,
+                    temporal=temporal,
+                )
+                if live_request is not None and live_request.clarification:
+                    logger.info(
+                        "live_temporal_unsupported",
+                        extra={
+                            "live_category": live_request.category,
+                            "temporal_kind": (
+                                temporal.kind if temporal is not None else None
+                            ),
+                            "relative_label": (
+                                temporal.relative_label
+                                if temporal is not None
+                                else None
+                            ),
+                            "timezone": (
+                                temporal.timezone if temporal is not None else None
+                            ),
+                            "routing_source": "standalone",
+                            "supported_by_capability": False,
+                        },
+                    )
+                    return ConversationResponse(
+                        executed=False,
+                        thread_id=self._current_thread_id,
+                        reply=live_request.clarification,
+                        language=turn_language,
+                    )
+                live_intent = (
+                    live_request.intent if live_request is not None else None
+                )
                 routing_source = "standalone"
                 if live_intent is None:
                     live_reference = self._fresh_live_reference("live_subject")
@@ -701,6 +739,7 @@ class ConversationService:
                             live_reference.metadata if live_reference else None
                         ),
                         place=(place_reference.metadata if place_reference else None),
+                        temporal=temporal,
                     )
                     if follow_up is not None and follow_up.clarification:
                         logger.info(

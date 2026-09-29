@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.core.time import system_clock
 from app.live import registry
 from app.live.schemas import (
     MarketArgs,
@@ -15,25 +16,34 @@ from app.live.schemas import (
     WeatherArgs,
     WebSearchArgs,
 )
+from app.live.temporal import (
+    TemporalInterpretation,
+    has_ambiguous_temporal_language,
+    interpret_temporal,
+    is_temporal_follow_up,
+    strip_trailing_temporal_phrase,
+)
 
 _WEATHER_RE = re.compile(
-    r"\bwhat(?:'s| is)\s+(?:the\s+)?(?:weather|temperature|forecast)\b|"
+    r"\bwhat(?:'s| is| was)\s+(?:the\s+)?(?:weather|temperature|forecast)\b|"
     r"\b(?:weather|temperature|forecast)\s+"
-    r"(?:in|at|near|for|today|tonight|tomorrow|now|current)\b|"
-    r"\b(?:today(?:'s)?|tonight(?:'s)?|tomorrow(?:'s)?|current)\s+"
+    r"(?:in|at|near|for|today|tonight|tomorrow|yesterday|now|current|this|last)\b|"
+    r"\b(?:today(?:'s)?|tonight(?:'s)?|tomorrow(?:'s)?|yesterday(?:'s)?|current)\s+"
     r"(?:weather|temperature|forecast)\b|"
     r"\b(?:is it raining|will it rain|rain(?:ing)?\s+"
     r"(?:today|tonight|tomorrow|now))\b",
     re.I,
 )
 _NEWS_RE = re.compile(
-    r"\b(?:latest|today(?:'s)?|current|happening|happened)\b.*\b(?:news|events?|india|ai|cybersecurity)\b|"
-    r"\b(?:latest|today(?:'s)?|current)\s+(?:ai|cybersecurity|india)\s+news\b|"
+    r"\b(?:latest|recent|today(?:'s)?|this week|current|happening|happened)\b.*\b(?:news|events?|india|ai|cybersecurity)\b|"
+    r"\b(?:latest|recent|today(?:'s)?|this week|current)\s+(?:ai|cybersecurity|india)\s+news\b|"
     r"\bwhat(?:'s| is) happening\b",
     re.I,
 )
 _MARKET_RE = re.compile(
     r"\b(?:stock price|trading at|market doing|quote)\b|"
+    r"\bwhat was\s+(?:[A-Z]{1,5}|bitcoin|btc|ethereum|eth|the market)\s+"
+    r"(?:trading\s+)?at\b|"
     r"\b(?:current|latest|today(?:'s)?|now)\b.{0,80}"
     r"\b(?:price|markets?|stocks?|bitcoin|btc|crypto)\b|"
     r"\b(?:price|markets?|stocks?|bitcoin|btc|crypto)\b.{0,80}"
@@ -71,11 +81,7 @@ _PLACE_FOLLOW_UP_RE = re.compile(
 )
 _RAIN_FOLLOW_UP_RE = re.compile(r"is\s+it\s+still\s+raining", re.I)
 _TEAM_FOLLOW_UP_RE = re.compile(r"(?:what|how)\s+about\s+that\s+team", re.I)
-_TEMPORAL_FOLLOW_UP_RE = re.compile(
-    r"(?:what|how)\s+about\s+"
-    r"(today|tonight|tomorrow|now|yesterday|next week)",
-    re.I,
-)
+_OPEN_NOW_FOLLOW_UP_RE = re.compile(r"is\s+it\s+open\s+(?:right\s+)?now", re.I)
 _SUBJECT_FOLLOW_UP_RE = re.compile(
     r"(?:what|how)\s+about\s+([A-Za-z][A-Za-z .'-]{1,80})", re.I
 )
@@ -106,6 +112,14 @@ _SYMBOLS = {
 class LiveIntent:
     tool_name: str
     arguments: dict[str, object]
+    temporal: TemporalInterpretation | None = None
+
+
+@dataclass(frozen=True)
+class LiveRequestResolution:
+    intent: LiveIntent | None = None
+    clarification: str | None = None
+    category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,63 +131,189 @@ class LiveFollowUpResolution:
 
 
 def resolve_live_intent(message: str) -> LiveIntent | None:
+    """Compatibility wrapper using the system clock and Rocky's UTC fallback."""
+
+    temporal = interpret_temporal(
+        message,
+        clock=system_clock,
+        timezone_name="UTC",
+    )
+    resolution = resolve_live_request(message, temporal=temporal)
+    return resolution.intent if resolution is not None else None
+
+
+def resolve_live_request(
+    message: str,
+    *,
+    temporal: TemporalInterpretation | None,
+) -> LiveRequestResolution | None:
     text = message.strip()
     if _looks_like_private_domain_request(text):
         return None
-    if _is_follow_up_only(text):
+    if _is_follow_up_only(text, temporal):
         return None
 
     if _WEATHER_RE.search(text):
+        if has_ambiguous_temporal_language(text):
+            return LiveRequestResolution(
+                clarification="Which weather time window do you mean?",
+                category="weather",
+            )
         location = _extract_location(text)
-        if location is None:
-            return LiveIntent(registry.WEATHER_CURRENT, {"location": "", "window": "current"})
-        window = _weather_window(text)
+        window = _weather_window_for(temporal, text)
+        if window is None:
+            historical = temporal is not None and temporal.relative_label in {
+                "yesterday",
+                "last_night",
+            }
+            detail = (
+                "Historical weather isn't supported yet."
+                if historical
+                else "That weather time window isn't supported yet."
+            )
+            return LiveRequestResolution(
+                clarification=detail,
+                category="weather",
+            )
         tool = registry.WEATHER_CURRENT if window == "current" else registry.WEATHER_FORECAST
-        return LiveIntent(tool, {"location": location, "window": window})
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                tool,
+                {"location": location or "", "window": window},
+                temporal,
+            ),
+            category="weather",
+        )
 
     if _TIME_RE.search(text):
         location = _extract_time_location(text)
         if location is None:
             return None
-        return LiveIntent(registry.TIME_LOOKUP, {"location": location})
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                registry.TIME_LOOKUP,
+                {"location": location},
+                temporal,
+            ),
+            category="time",
+        )
 
     if _MARKET_RE.search(text):
+        if has_ambiguous_temporal_language(text):
+            return LiveRequestResolution(
+                clarification="Which market time window do you mean?",
+                category="markets",
+            )
         symbol, asset_type = _market_symbol(text)
         if symbol == "SPY" and asset_type == "index" and not re.search(
             r"\b(?:market|markets|s&p|sp500)\b", text, re.I
         ):
             return None
-        return LiveIntent(
-            registry.CRYPTO_QUOTE if asset_type == "crypto" else registry.MARKET_QUOTE,
-            {"symbol": symbol, "asset_type": asset_type},
+        if temporal is not None and temporal.relative_label not in {
+            "now",
+            "today",
+            "latest",
+        }:
+            return LiveRequestResolution(
+                clarification="Historical and future market quotes aren't supported yet.",
+                category="markets",
+            )
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                registry.CRYPTO_QUOTE if asset_type == "crypto" else registry.MARKET_QUOTE,
+                {"symbol": symbol, "asset_type": asset_type},
+                temporal,
+            ),
+            category="markets",
         )
 
     if _NEWS_RE.search(text):
-        return LiveIntent(
-            registry.NEWS_SEARCH,
-            {"query": _news_query(text), "max_results": 5},
+        if temporal is not None and temporal.relative_label not in {
+            "now",
+            "today",
+            "this_week",
+            "recent",
+            "latest",
+        }:
+            return LiveRequestResolution(
+                clarification="That news time window isn't supported yet.",
+                category="news",
+            )
+        arguments: dict[str, object] = {
+            "query": _news_query(text),
+            "max_results": 5,
+        }
+        if (
+            temporal is not None
+            and temporal.relative_label in {"today", "this_week"}
+            and temporal.start_at is not None
+        ):
+            arguments["published_after"] = temporal.start_at
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                registry.NEWS_SEARCH,
+                arguments,
+                temporal,
+            ),
+            category="news",
         )
 
     if _SPORTS_RE.search(text):
-        return LiveIntent(
-            registry.SPORTS_LOOKUP,
-            {"query": _clean_question(text), "lookup": "latest", "max_results": 3},
+        if temporal is not None and temporal.relative_label in {
+            "yesterday",
+            "last_night",
+            "this_morning",
+            "this_afternoon",
+            "this_evening",
+        }:
+            return LiveRequestResolution(
+                clarification="Historical sports lookup isn't supported yet.",
+                category="sports",
+            )
+        lookup = "score" if temporal and temporal.relative_label == "now" else "latest"
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                registry.SPORTS_LOOKUP,
+                {"query": _clean_question(text), "lookup": lookup, "max_results": 3},
+                temporal,
+            ),
+            category="sports",
         )
 
     if _PLACES_RE.search(text):
+        if temporal is not None and re.search(r"\bopen\b", text, re.I):
+            return LiveRequestResolution(
+                clarification="Open-now filtering isn't supported for places yet.",
+                category="places",
+            )
         location = _extract_location(text)
         if location is None and _HERE_RE.search(text):
-            return LiveIntent(registry.PLACES_SEARCH, {"query": _place_query(text), "location": ""})
+            return LiveRequestResolution(
+                intent=LiveIntent(
+                    registry.PLACES_SEARCH,
+                    {"query": _place_query(text), "location": ""},
+                    temporal,
+                ),
+                category="places",
+            )
         if location is not None:
-            return LiveIntent(
-                registry.PLACES_SEARCH,
-                {"query": _place_query(text), "location": location, "max_results": 5},
+            return LiveRequestResolution(
+                intent=LiveIntent(
+                    registry.PLACES_SEARCH,
+                    {"query": _place_query(text), "location": location, "max_results": 5},
+                    temporal,
+                ),
+                category="places",
             )
 
     if _WEB_CURRENT_RE.search(text):
-        return LiveIntent(
-            registry.WEB_SEARCH,
-            {"query": _clean_question(text), "max_results": 3},
+        return LiveRequestResolution(
+            intent=LiveIntent(
+                registry.WEB_SEARCH,
+                {"query": _clean_question(text), "max_results": 3},
+                temporal,
+            ),
+            category="web",
         )
 
     return None
@@ -220,10 +360,17 @@ def resolve_live_follow_up(
     *,
     live_subject: Mapping[str, object] | None,
     place: Mapping[str, object] | None,
+    temporal: TemporalInterpretation | None = None,
 ) -> LiveFollowUpResolution | None:
     """Resolve only bounded, category-compatible references to prior live state."""
 
     text = message.strip(" ?.\t\n")
+    if temporal is None:
+        temporal = interpret_temporal(
+            text,
+            clock=system_clock,
+            timezone_name="UTC",
+        )
     if _looks_like_private_domain_request(text):
         return None
 
@@ -253,7 +400,7 @@ def resolve_live_follow_up(
         )
 
     if _PRICE_FOLLOW_UP_RE.fullmatch(text):
-        return _market_follow_up(live_subject)
+        return _market_follow_up(live_subject, temporal=temporal)
 
     if _TEAM_FOLLOW_UP_RE.fullmatch(text):
         query = _context_string(live_subject, "query")
@@ -271,26 +418,41 @@ def resolve_live_follow_up(
             category="sports",
         )
 
-    if _RAIN_FOLLOW_UP_RE.fullmatch(text):
-        return _weather_follow_up(live_subject, window="current")
+    if _OPEN_NOW_FOLLOW_UP_RE.fullmatch(text):
+        if _context_tool(live_subject) == registry.PLACES_SEARCH:
+            return LiveFollowUpResolution(
+                clarification="Open-now filtering isn't supported for places yet.",
+                category="places",
+            )
+        return LiveFollowUpResolution(
+            clarification="Which place do you mean?",
+            category="places",
+        )
 
-    temporal = _TEMPORAL_FOLLOW_UP_RE.fullmatch(text)
-    if temporal:
-        window = temporal.group(1).lower()
+    if _RAIN_FOLLOW_UP_RE.fullmatch(text):
+        return _weather_follow_up(live_subject, window="current", temporal=temporal)
+
+    if is_temporal_follow_up(text, temporal):
+        assert temporal is not None
+        label = temporal.relative_label
         tool = _context_tool(live_subject)
-        if window == "now" and tool in {
+        if label == "now" and tool in {
             registry.MARKET_QUOTE,
             registry.CRYPTO_QUOTE,
         }:
-            return _market_follow_up(live_subject)
+            return _market_follow_up(live_subject, temporal=temporal)
         if tool in {registry.WEATHER_CURRENT, registry.WEATHER_FORECAST}:
-            if window in {"yesterday", "next week"}:
+            window = _weather_window_for(temporal, text)
+            if window is None:
                 return LiveFollowUpResolution(
-                    clarification="Historical weather and next-week weather aren't supported yet.",
+                    clarification="Historical weather and extended weather windows aren't supported yet.",
                     category="weather",
                 )
-            weather_window = "current" if window == "now" else window
-            return _weather_follow_up(live_subject, window=weather_window)
+            return _weather_follow_up(
+                live_subject,
+                window=window,
+                temporal=temporal,
+            )
         if tool in {registry.MARKET_QUOTE, registry.CRYPTO_QUOTE}:
             return LiveFollowUpResolution(
                 clarification="I can continue with a current quote, but not that time window.",
@@ -341,7 +503,10 @@ def resolve_live_follow_up(
 
 
 def _weather_follow_up(
-    context: Mapping[str, object] | None, *, window: str
+    context: Mapping[str, object] | None,
+    *,
+    window: str,
+    temporal: TemporalInterpretation | None,
 ) -> LiveFollowUpResolution:
     location = _context_string(context, "location")
     if _context_tool(context) not in {
@@ -359,6 +524,7 @@ def _weather_follow_up(
                 "location": "" if location == "Current location" else location,
                 "window": window,
             },
+            temporal,
         ),
         category="weather",
     )
@@ -366,6 +532,8 @@ def _weather_follow_up(
 
 def _market_follow_up(
     context: Mapping[str, object] | None,
+    *,
+    temporal: TemporalInterpretation | None = None,
 ) -> LiveFollowUpResolution:
     tool = _context_tool(context)
     symbol = _context_string(context, "symbol")
@@ -378,7 +546,11 @@ def _market_follow_up(
             category="markets",
         )
     return LiveFollowUpResolution(
-        intent=LiveIntent(tool, {"symbol": symbol, "asset_type": asset_type}),
+        intent=LiveIntent(
+            tool,
+            {"symbol": symbol, "asset_type": asset_type},
+            temporal,
+        ),
         category="markets",
     )
 
@@ -395,15 +567,18 @@ def _context_string(
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _is_follow_up_only(text: str) -> bool:
-    return any(
+def _is_follow_up_only(
+    text: str, temporal: TemporalInterpretation | None
+) -> bool:
+    cleaned = text.strip(" ?.\t\n")
+    return is_temporal_follow_up(cleaned, temporal) or any(
         pattern.fullmatch(text.strip(" ?.\t\n"))
         for pattern in (
             _PRICE_FOLLOW_UP_RE,
             _PLACE_FOLLOW_UP_RE,
             _RAIN_FOLLOW_UP_RE,
             _TEAM_FOLLOW_UP_RE,
-            _TEMPORAL_FOLLOW_UP_RE,
+            _OPEN_NOW_FOLLOW_UP_RE,
         )
     )
 
@@ -431,25 +606,21 @@ def _extract_time_location(text: str) -> str | None:
 
 
 def _trim_location(value: str) -> str:
-    return re.sub(
-        r"\b(?:today|tomorrow|tonight|now|please|right now)\b.*$",
-        "",
-        value.strip(" ?."),
-        flags=re.I,
-    ).strip(" ?.")
+    cleaned = strip_trailing_temporal_phrase(value.strip(" ?."))
+    return re.sub(r"\bplease\b.*$", "", cleaned, flags=re.I).strip(" ?.")
 
 
-def _weather_window(text: str) -> str:
-    lowered = text.lower()
-    if "tomorrow" in lowered:
-        return "tomorrow"
-    if "tonight" in lowered:
-        return "tonight"
-    if "today" in lowered:
-        return "today"
-    if "forecast" in lowered:
-        return "short"
-    return "current"
+def _weather_window_for(
+    temporal: TemporalInterpretation | None, text: str
+) -> str | None:
+    if temporal is None:
+        return "short" if "forecast" in text.lower() else "current"
+    return {
+        "now": "current",
+        "today": "today",
+        "tonight": "tonight",
+        "tomorrow": "tomorrow",
+    }.get(temporal.relative_label)
 
 
 def _market_symbol(text: str) -> tuple[str, str]:

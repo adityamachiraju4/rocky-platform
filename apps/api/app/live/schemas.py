@@ -21,6 +21,18 @@ class WeatherArgs(StrictLiveModel):
 class NewsArgs(StrictLiveModel):
     query: str = Field(min_length=2, max_length=160)
     max_results: int = Field(default=5, ge=1, le=5)
+    published_after: datetime | None = None
+
+    @field_validator("published_after")
+    @classmethod
+    def require_aware_publication_boundary(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is not None and (
+            value.tzinfo is None or value.utcoffset() is None
+        ):
+            raise ValueError("published_after must be timezone-aware")
+        return value
 
 
 class WebSearchArgs(StrictLiveModel):
