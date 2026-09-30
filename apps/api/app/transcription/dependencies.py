@@ -52,6 +52,15 @@ def get_local_whisper_transcription_provider() -> TranscriptionProvider:
                 device=device,
                 compute_type=compute_type,
                 language=language,
+                startup_timeout_seconds=(
+                    settings.get_voice_worker_startup_seconds()
+                ),
+                request_timeout_seconds=(
+                    settings.get_voice_worker_request_seconds()
+                ),
+                shutdown_timeout_seconds=(
+                    settings.get_voice_worker_shutdown_seconds()
+                ),
             )
             _local_whisper_model = model
             _local_whisper_device = device

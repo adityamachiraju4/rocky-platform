@@ -328,7 +328,7 @@ async def test_non_english_skips_english_kokoro_and_uses_external_tts() -> None:
     assert audio.content == b"telugu"
     assert audio.provider == "openai"
     assert openai.languages == ["te"]
-    assert local._pipeline is None
+    assert local.is_pipeline_loaded is False
 
 
 @pytest.mark.asyncio
@@ -344,7 +344,7 @@ async def test_tamil_skips_english_kokoro_and_uses_external_tts() -> None:
     assert audio.content == b"tamil"
     assert audio.provider == "openai"
     assert openai.languages == ["ta"]
-    assert local._pipeline is None
+    assert local.is_pipeline_loaded is False
 
 
 @pytest.mark.asyncio
@@ -356,7 +356,7 @@ async def test_unsupported_local_language_is_available_for_browser_fallback() ->
         await provider.synthesize("வணக்கம்", language="ta")
 
     assert excinfo.value.code == "unsupported_language"
-    assert local._pipeline is None
+    assert local.is_pipeline_loaded is False
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 import sys
 from pathlib import Path
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from types import SimpleNamespace
 
 import httpx
@@ -37,6 +37,7 @@ from app.transcription.dependencies import (
 )
 from app.transcription.local_whisper_provider import (
     LocalWhisperTranscriptionProvider,
+    _WhisperWorker,
 )
 from app.transcription.language_stabilizer import (
     script_evidence,
@@ -71,6 +72,50 @@ class _FakeTranscriptionProvider:
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
+
+
+class _DirectWhisperWorker:
+    """Exercise child logic in-process without loading a real model."""
+
+    def __init__(self) -> None:
+        self._handler = _WhisperWorker()
+        self._running = False
+        self._active_count = 0
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def active_count(self) -> int:
+        return self._active_count
+
+    async def request(
+        self,
+        operation: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        self._running = True
+        self._active_count += 1
+        try:
+            return self._handler.handle(operation, dict(payload))
+        finally:
+            self._active_count -= 1
+
+    async def unload_if_idle(self, _idle_seconds: float) -> bool:
+        was_running = self._running
+        self._running = False
+        return was_running
+
+    async def close(self) -> bool:
+        return await self.unload_if_idle(0)
+
+
+def _local_whisper_provider(**kwargs: str) -> LocalWhisperTranscriptionProvider:
+    return LocalWhisperTranscriptionProvider(
+        **kwargs,
+        worker=_DirectWhisperWorker(),
+    )
 
 
 def _use_fake_provider(
@@ -626,7 +671,7 @@ async def test_local_whisper_provider_success_reuses_model_and_deletes_temp_file
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -674,7 +719,7 @@ async def test_local_whisper_warmup_loads_and_reuses_model(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -708,7 +753,7 @@ async def test_local_whisper_empty_segments_reports_empty_transcription(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -749,7 +794,7 @@ async def test_local_whisper_provider_passes_language_and_transcribe_task(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -794,7 +839,7 @@ async def test_local_whisper_auto_propagates_detected_language(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -840,7 +885,7 @@ async def test_local_whisper_auto_stabilizes_telugu_script_misdetections(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -884,7 +929,7 @@ async def test_local_whisper_auto_propagates_detected_tamil(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -933,7 +978,7 @@ async def test_local_whisper_auto_rechecks_low_confidence_latin_detection_as_eng
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",
@@ -973,7 +1018,7 @@ async def test_local_whisper_provider_failure_deletes_temp_file(
         "faster_whisper",
         SimpleNamespace(WhisperModel=_WhisperModel),
     )
-    provider = LocalWhisperTranscriptionProvider(
+    provider = _local_whisper_provider(
         model_name="small",
         device="auto",
         compute_type="auto",

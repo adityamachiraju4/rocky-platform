@@ -42,6 +42,15 @@ def get_local_speech_provider() -> SpeechProvider | None:
             _kokoro_provider = KokoroSpeechProvider(
                 voice=voice,
                 speed=speed,
+                startup_timeout_seconds=(
+                    settings.get_voice_worker_startup_seconds()
+                ),
+                request_timeout_seconds=(
+                    settings.get_voice_worker_request_seconds()
+                ),
+                shutdown_timeout_seconds=(
+                    settings.get_voice_worker_shutdown_seconds()
+                ),
             )
             _kokoro_provider_voice = voice
             _kokoro_provider_speed = speed

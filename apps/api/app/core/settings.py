@@ -50,6 +50,9 @@ Environment variables
 * ``LOCAL_TTS_WARMUP`` — warm local speech after API startup.
 * ``VOICE_MODEL_IDLE_SECONDS`` — inactivity before a local model may unload.
 * ``VOICE_MODEL_REAPER_SECONDS`` — interval between local model idle checks.
+* ``VOICE_WORKER_STARTUP_SECONDS`` — local worker startup/handshake timeout.
+* ``VOICE_WORKER_REQUEST_SECONDS`` — local worker inference/IPC timeout.
+* ``VOICE_WORKER_SHUTDOWN_SECONDS`` — local worker bounded shutdown timeout.
 * ``CORS_ALLOWED_ORIGINS`` — comma-separated browser/native app origins allowed
   to call private APIs cross-origin.
 * ``PUBLIC_APP_URL`` — public web-app origin used for auth action links.
@@ -112,6 +115,9 @@ _DEFAULT_LOCAL_TTS_SPEED = 0.95
 _DEFAULT_LOCAL_TTS_WARMUP = False
 _DEFAULT_VOICE_MODEL_IDLE_SECONDS = 600.0
 _DEFAULT_VOICE_MODEL_REAPER_SECONDS = 60.0
+_DEFAULT_VOICE_WORKER_STARTUP_SECONDS = 10.0
+_DEFAULT_VOICE_WORKER_REQUEST_SECONDS = 300.0
+_DEFAULT_VOICE_WORKER_SHUTDOWN_SECONDS = 5.0
 _DEFAULT_CORS_ALLOWED_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -488,6 +494,33 @@ def get_voice_model_reaper_seconds() -> float:
     )
 
 
+def get_voice_worker_startup_seconds() -> float:
+    """Positive timeout for child process startup and protocol readiness."""
+
+    return _env_positive_float(
+        "VOICE_WORKER_STARTUP_SECONDS",
+        _DEFAULT_VOICE_WORKER_STARTUP_SECONDS,
+    )
+
+
+def get_voice_worker_request_seconds() -> float:
+    """Positive timeout for one serialized local inference request."""
+
+    return _env_positive_float(
+        "VOICE_WORKER_REQUEST_SECONDS",
+        _DEFAULT_VOICE_WORKER_REQUEST_SECONDS,
+    )
+
+
+def get_voice_worker_shutdown_seconds() -> float:
+    """Positive bound for graceful shutdown before forced termination."""
+
+    return _env_positive_float(
+        "VOICE_WORKER_SHUTDOWN_SECONDS",
+        _DEFAULT_VOICE_WORKER_SHUTDOWN_SECONDS,
+    )
+
+
 def get_cors_allowed_origins() -> list[str]:
     raw = os.getenv("CORS_ALLOWED_ORIGINS")
     if raw is None or raw.strip() == "":
@@ -616,6 +649,9 @@ __all__ = [
     "get_local_tts_warmup",
     "get_voice_model_idle_seconds",
     "get_voice_model_reaper_seconds",
+    "get_voice_worker_startup_seconds",
+    "get_voice_worker_request_seconds",
+    "get_voice_worker_shutdown_seconds",
     "get_cors_allowed_origins",
     "validate_auth_runtime_configuration",
 ]
