@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -126,3 +128,50 @@ def test_email_configuration_is_not_part_of_login_runtime_validation(
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
 
     settings.validate_auth_runtime_configuration()
+
+
+@pytest.mark.asyncio
+async def test_normal_startup_does_not_construct_local_voice_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.speech import dependencies as speech_dependencies
+    from app.transcription import dependencies as transcription_dependencies
+
+    monkeypatch.delenv("LOCAL_WHISPER_WARMUP", raising=False)
+    monkeypatch.delenv("LOCAL_TTS_WARMUP", raising=False)
+    transcription_dependencies._local_whisper_provider = None
+    speech_dependencies._kokoro_provider = None
+
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        assert transcription_dependencies._local_whisper_provider is None
+        assert speech_dependencies._kokoro_provider is None
+
+
+@pytest.mark.asyncio
+async def test_voice_reaper_starts_and_cancels_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import main
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _fake_reaper(**_kwargs) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(main, "run_voice_model_reaper", _fake_reaper)
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert cancelled.is_set()
+    assert not any(
+        task.get_name() == "voice-model-idle-reaper" and not task.done()
+        for task in asyncio.all_tasks()
+    )

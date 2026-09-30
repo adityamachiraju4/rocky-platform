@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Annotated
 
 from fastapi import Depends
@@ -19,11 +20,12 @@ from app.transcription.service import TranscriptionService
 
 logger = logging.getLogger(__name__)
 
-_local_whisper_provider: TranscriptionProvider | None = None
+_local_whisper_provider: LocalWhisperTranscriptionProvider | None = None
 _local_whisper_model: str | None = None
 _local_whisper_device: str | None = None
 _local_whisper_compute_type: str | None = None
 _local_whisper_language: str | None = None
+_local_whisper_provider_lock = threading.Lock()
 
 
 def get_local_whisper_transcription_provider() -> TranscriptionProvider:
@@ -37,24 +39,61 @@ def get_local_whisper_transcription_provider() -> TranscriptionProvider:
     device = settings.get_local_whisper_device()
     compute_type = settings.get_local_whisper_compute_type()
     language = settings.get_local_whisper_language()
-    if (
-        _local_whisper_provider is None
-        or _local_whisper_model != model
-        or _local_whisper_device != device
-        or _local_whisper_compute_type != compute_type
-        or _local_whisper_language != language
-    ):
-        _local_whisper_provider = LocalWhisperTranscriptionProvider(
-            model_name=model,
-            device=device,
-            compute_type=compute_type,
-            language=language,
-        )
-        _local_whisper_model = model
-        _local_whisper_device = device
-        _local_whisper_compute_type = compute_type
-        _local_whisper_language = language
-    return _local_whisper_provider
+    with _local_whisper_provider_lock:
+        if (
+            _local_whisper_provider is None
+            or _local_whisper_model != model
+            or _local_whisper_device != device
+            or _local_whisper_compute_type != compute_type
+            or _local_whisper_language != language
+        ):
+            _local_whisper_provider = LocalWhisperTranscriptionProvider(
+                model_name=model,
+                device=device,
+                compute_type=compute_type,
+                language=language,
+            )
+            _local_whisper_model = model
+            _local_whisper_device = device
+            _local_whisper_compute_type = compute_type
+            _local_whisper_language = language
+        return _local_whisper_provider
+
+
+def get_existing_local_whisper_transcription_provider(
+) -> LocalWhisperTranscriptionProvider | None:
+    """Return the existing provider without creating it for the idle reaper."""
+
+    with _local_whisper_provider_lock:
+        return _local_whisper_provider
+
+
+async def unload_existing_local_whisper_provider_if_idle(
+    idle_seconds: float,
+) -> bool:
+    provider = get_existing_local_whisper_transcription_provider()
+    if provider is None:
+        return False
+    return await provider.unload_if_idle(idle_seconds)
+
+
+async def close_existing_local_whisper_provider() -> bool:
+    global _local_whisper_compute_type
+    global _local_whisper_device
+    global _local_whisper_language
+    global _local_whisper_model
+    global _local_whisper_provider
+
+    with _local_whisper_provider_lock:
+        provider = _local_whisper_provider
+        _local_whisper_provider = None
+        _local_whisper_model = None
+        _local_whisper_device = None
+        _local_whisper_compute_type = None
+        _local_whisper_language = None
+    if provider is None:
+        return False
+    return await provider.close()
 
 
 async def warm_local_whisper_transcription_provider() -> None:
@@ -133,6 +172,9 @@ TranscriptionServiceDep = Annotated[
 
 __all__ = [
     "get_local_whisper_transcription_provider",
+    "get_existing_local_whisper_transcription_provider",
+    "unload_existing_local_whisper_provider_if_idle",
+    "close_existing_local_whisper_provider",
     "warm_local_whisper_transcription_provider",
     "get_openai_transcription_provider",
     "get_transcription_provider",

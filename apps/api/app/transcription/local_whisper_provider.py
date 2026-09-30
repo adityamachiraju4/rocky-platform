@@ -4,13 +4,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from app.transcription.provider import TranscriptionProviderError, TranscriptionResult
 from app.transcription.language_stabilizer import stabilize_transcription_language
+from app.voice.lifecycle import IdleVoiceModel
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,8 @@ def _safe_segment_text(segment: Any) -> str:
 class LocalWhisperTranscriptionProvider:
     """Run speech-to-text locally with faster-whisper.
 
-    The faster-whisper model is loaded lazily on the first transcription and
-    reused for the provider lifetime. A lock keeps concurrent first requests
-    from loading duplicate model instances.
+    The faster-whisper model is loaded lazily, reused while voice is active,
+    and may be detached after an independently configured idle period.
     """
 
     def __init__(
@@ -70,13 +70,18 @@ class LocalWhisperTranscriptionProvider:
         device: str,
         compute_type: str,
         language: str,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._model_name = model_name
         self._device = device
         self._compute_type = compute_type
         self._language = language
-        self._model: Any | None = None
-        self._model_lock = threading.Lock()
+        self._model_lifecycle = IdleVoiceModel[Any](
+            loader=self._load_model,
+            provider="whisper",
+            model=model_name,
+            monotonic=monotonic,
+        )
 
     @property
     def model_name(self) -> str:
@@ -93,6 +98,14 @@ class LocalWhisperTranscriptionProvider:
     @property
     def language(self) -> str:
         return self._language
+
+    @property
+    def is_model_loaded(self) -> bool:
+        return self._model_lifecycle.is_loaded
+
+    @property
+    def active_count(self) -> int:
+        return self._model_lifecycle.active_count
 
     async def transcribe(
         self, audio: bytes, *, filename: str, content_type: str
@@ -147,7 +160,7 @@ class LocalWhisperTranscriptionProvider:
     async def warm_up(self) -> None:
         """Load the model off the event loop before the first voice request."""
         started = time.perf_counter()
-        await asyncio.to_thread(self._get_model)
+        await asyncio.to_thread(self._warm_up_sync)
         logger.info(
             "Local Whisper warm-up complete: elapsed_ms=%.1f model=%s",
             (time.perf_counter() - started) * 1000,
@@ -155,8 +168,25 @@ class LocalWhisperTranscriptionProvider:
             extra={"transcription_provider": "local_whisper"},
         )
 
+    async def unload_if_idle(self, idle_seconds: float) -> bool:
+        return await self._model_lifecycle.unload_if_idle(idle_seconds)
+
+    async def close(self) -> bool:
+        return await self._model_lifecycle.close()
+
+    def _warm_up_sync(self) -> None:
+        with self._model_lifecycle.use():
+            pass
+
     def _transcribe_file(self, path: Path) -> TranscriptionResult:
-        model = self._get_model()
+        with self._model_lifecycle.use() as model:
+            return self._transcribe_file_with_model(model, path)
+
+    def _transcribe_file_with_model(
+        self,
+        model: Any,
+        path: Path,
+    ) -> TranscriptionResult:
         started = time.perf_counter()
         configured_language = (
             None if self._language.strip().lower() == "auto" else self._language
@@ -332,37 +362,19 @@ class LocalWhisperTranscriptionProvider:
         ]
         return sum(scores) / len(scores) if scores else float("-inf")
 
-    def _get_model(self) -> Any:
-        with self._model_lock:
-            if self._model is None:
-                started = time.perf_counter()
-                try:
-                    from faster_whisper import WhisperModel
-                except ImportError as exc:  # pragma: no cover - env guard
-                    raise TranscriptionProviderError(
-                        "faster-whisper is not installed.",
-                        code="local_whisper_unavailable",
-                    ) from exc
-                logger.info(
-                    "Loading local Whisper transcription model: "
-                    "model=%s device=%s compute_type=%s",
-                    self._model_name,
-                    self._device,
-                    self._compute_type,
-                    extra={"transcription_provider": "local_whisper"},
-                )
-                self._model = WhisperModel(
-                    self._model_name,
-                    device=self._device,
-                    compute_type=self._compute_type,
-                )
-                logger.info(
-                    "Local Whisper model loaded: elapsed_ms=%.1f model=%s",
-                    (time.perf_counter() - started) * 1000,
-                    self._model_name,
-                    extra={"transcription_provider": "local_whisper"},
-                )
-        return self._model
+    def _load_model(self) -> Any:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:  # pragma: no cover - env guard
+            raise TranscriptionProviderError(
+                "faster-whisper is not installed.",
+                code="local_whisper_unavailable",
+            ) from exc
+        return WhisperModel(
+            self._model_name,
+            device=self._device,
+            compute_type=self._compute_type,
+        )
 
 
 def _safe_message(value: str) -> str:

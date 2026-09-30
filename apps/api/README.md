@@ -46,6 +46,11 @@ Speech:
 - Local STT defaults to faster-whisper `small`.
 - `LOCAL_WHISPER_LANGUAGE=auto` keeps automatic speech-language detection.
 - Local English TTS defaults to Kokoro.
+- Local models load on first use, remain warm during activity, and become
+  eligible for unloading after `VOICE_MODEL_IDLE_SECONDS` (default 600).
+- `VOICE_MODEL_REAPER_SECONDS` controls idle checks (default 60); explicit
+  `LOCAL_WHISPER_WARMUP=true` or `LOCAL_TTS_WARMUP=true` restores startup
+  warm-up for development.
 - OpenAI speech/STT keys are optional fallbacks and must remain server-side.
 
 Live intelligence:

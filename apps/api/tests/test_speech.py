@@ -78,7 +78,7 @@ def test_local_tts_defaults_are_locked(
     assert settings.get_local_tts_provider() == "kokoro"
     assert settings.get_local_tts_voice() == "am_adam"
     assert settings.get_local_tts_speed() == 0.95
-    assert settings.get_local_tts_warmup() is True
+    assert settings.get_local_tts_warmup() is False
 
 
 @pytest.fixture(autouse=True)

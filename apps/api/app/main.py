@@ -39,9 +39,14 @@ from app.conversation.router import router as conversation_router
 from app.speech.router import router as speech_router
 from app.transcription.router import router as transcription_router
 from app.transcription.dependencies import (
+    close_existing_local_whisper_provider,
     warm_local_whisper_transcription_provider,
 )
-from app.speech.dependencies import warm_local_speech_provider
+from app.speech.dependencies import (
+    close_existing_local_speech_provider,
+    warm_local_speech_provider,
+)
+from app.voice.reaper import run_voice_model_reaper
 from app.reminders.router import router as reminders_router
 from app.notifications.router import router as notifications_router
 from app.notes.router import router as notes_router
@@ -92,6 +97,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     management is owned by Alembic — startup never creates tables.
     """
     logger.info("Rocky API starting up")
+    voice_model_idle_seconds = settings.get_voice_model_idle_seconds()
+    voice_model_reaper_seconds = settings.get_voice_model_reaper_seconds()
     try:
         settings.validate_auth_runtime_configuration()
     except settings.MissingConfigurationError as exc:
@@ -110,15 +117,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         raise RuntimeError("Database configuration is invalid.") from exc
     voice_warmup_task = asyncio.create_task(_warm_voice_models())
+    voice_reaper_task = asyncio.create_task(
+        run_voice_model_reaper(
+            idle_seconds=voice_model_idle_seconds,
+            interval_seconds=voice_model_reaper_seconds,
+        ),
+        name="voice-model-idle-reaper",
+    )
     try:
         yield
     finally:
-        if not voice_warmup_task.done():
-            voice_warmup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await voice_warmup_task
-        logger.info("Rocky API shutting down")
-        await get_engine().dispose()
+        for task in (voice_warmup_task, voice_reaper_task):
+            if not task.done():
+                task.cancel()
+        for task in (voice_warmup_task, voice_reaper_task):
+            with suppress(asyncio.CancelledError):
+                await task
+        try:
+            await asyncio.gather(
+                close_existing_local_whisper_provider(),
+                close_existing_local_speech_provider(),
+            )
+        finally:
+            logger.info("Rocky API shutting down")
+            await get_engine().dispose()
 
 
 app = FastAPI(

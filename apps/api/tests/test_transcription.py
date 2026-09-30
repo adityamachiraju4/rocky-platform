@@ -444,8 +444,8 @@ def test_transcription_language_defaults_to_english(
     assert provider.language == "en"
 
 
-def test_local_whisper_warmup_defaults_to_enabled() -> None:
-    assert settings.get_local_whisper_warmup() is True
+def test_local_whisper_warmup_defaults_to_disabled() -> None:
+    assert settings.get_local_whisper_warmup() is False
 
 
 def test_local_whisper_language_can_be_configured(

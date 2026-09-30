@@ -48,6 +48,8 @@ Environment variables
 * ``LOCAL_TTS_VOICE`` — local Rocky audition/default voice.
 * ``LOCAL_TTS_SPEED`` — local speech speed.
 * ``LOCAL_TTS_WARMUP`` — warm local speech after API startup.
+* ``VOICE_MODEL_IDLE_SECONDS`` — inactivity before a local model may unload.
+* ``VOICE_MODEL_REAPER_SECONDS`` — interval between local model idle checks.
 * ``CORS_ALLOWED_ORIGINS`` — comma-separated browser/native app origins allowed
   to call private APIs cross-origin.
 * ``PUBLIC_APP_URL`` — public web-app origin used for auth action links.
@@ -75,6 +77,7 @@ _ENV_PATH = _Path(__file__).resolve().parents[2] / ".env"
 _load_dotenv(_ENV_PATH, override=False)
 # --- end .env loading ---
 
+import math
 import os
 from datetime import timedelta
 from urllib.parse import urlsplit
@@ -97,7 +100,7 @@ _DEFAULT_LOCAL_WHISPER_MODEL = "small"
 _DEFAULT_LOCAL_WHISPER_DEVICE = "auto"
 _DEFAULT_LOCAL_WHISPER_COMPUTE_TYPE = "auto"
 _DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
-_DEFAULT_LOCAL_WHISPER_WARMUP = True
+_DEFAULT_LOCAL_WHISPER_WARMUP = False
 _DEFAULT_OPENAI_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _DEFAULT_LIVE_TIMEOUT_SECONDS = 3.0
@@ -106,7 +109,9 @@ _DEFAULT_LOCAL_TTS_ENABLED = True
 _DEFAULT_LOCAL_TTS_PROVIDER = "kokoro"
 _DEFAULT_LOCAL_TTS_VOICE = "am_adam"
 _DEFAULT_LOCAL_TTS_SPEED = 0.95
-_DEFAULT_LOCAL_TTS_WARMUP = True
+_DEFAULT_LOCAL_TTS_WARMUP = False
+_DEFAULT_VOICE_MODEL_IDLE_SECONDS = 600.0
+_DEFAULT_VOICE_MODEL_REAPER_SECONDS = 60.0
 _DEFAULT_CORS_ALLOWED_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -462,6 +467,27 @@ def get_local_tts_warmup() -> bool:
     return _env_bool("LOCAL_TTS_WARMUP", _DEFAULT_LOCAL_TTS_WARMUP)
 
 
+def get_voice_model_idle_seconds() -> float:
+    """Idle duration before an inactive local voice model may be unloaded.
+
+    Zero means that an inactive model is eligible at the next reaper check.
+    """
+
+    return _env_nonnegative_float(
+        "VOICE_MODEL_IDLE_SECONDS",
+        _DEFAULT_VOICE_MODEL_IDLE_SECONDS,
+    )
+
+
+def get_voice_model_reaper_seconds() -> float:
+    """Positive interval between local voice-model idle checks."""
+
+    return _env_positive_float(
+        "VOICE_MODEL_REAPER_SECONDS",
+        _DEFAULT_VOICE_MODEL_REAPER_SECONDS,
+    )
+
+
 def get_cors_allowed_origins() -> list[str]:
     raw = os.getenv("CORS_ALLOWED_ORIGINS")
     if raw is None or raw.strip() == "":
@@ -509,6 +535,26 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_nonnegative_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be numeric, got {raw!r}") from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be zero or greater, got {raw!r}")
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    value = _env_nonnegative_float(name, default)
+    if value == 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
 
 
 # Convenience module-level constants, evaluated at import time. Functions
@@ -568,6 +614,8 @@ __all__ = [
     "get_local_tts_voice",
     "get_local_tts_speed",
     "get_local_tts_warmup",
+    "get_voice_model_idle_seconds",
+    "get_voice_model_reaper_seconds",
     "get_cors_allowed_origins",
     "validate_auth_runtime_configuration",
 ]
