@@ -23,6 +23,7 @@ openai==2.48.0
 kokoro==0.9.4
 soundfile==0.14.0
 faster-whisper==1.2.1
+av==18.1.0                  # faster-whisper 1.2.1 compatibility; PyAV 19 removed metadata_errors
 
 # Auth / security
 pwdlib==0.3.0             # Argon2id password hashing
