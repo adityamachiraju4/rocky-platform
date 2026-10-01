@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from copy import deepcopy
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -95,11 +95,40 @@ class PersonalContextRequest:
         )
 
 
+# Five short alternatives fit the existing concise clarification UX. These
+# bounds apply to provider proposals, not authoritative resolver ambiguity.
+CLARIFICATION_CANDIDATE_MAX = 5
+CLARIFICATION_CANDIDATE_CHARS = 200
+CLARIFICATION_PROMPT_CHARS = 1000
+ClarificationCandidate = Annotated[
+    str, Field(strict=True, min_length=1, max_length=CLARIFICATION_CANDIDATE_CHARS)
+]
+
+
+class ClarificationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    prompt: str | None = Field(default=None, max_length=CLARIFICATION_PROMPT_CHARS)
+    candidates: list[ClarificationCandidate] | None = Field(
+        default=None, max_length=CLARIFICATION_CANDIDATE_MAX
+    )
+
+
 @dataclass(frozen=True)
 class Clarification:
     kind: Literal["clarification"]
     prompt: str | None = None
     candidates: tuple[str, ...] = ()
+
+    def validated(self) -> ClarificationPayload:
+        try:
+            if self.kind != "clarification":
+                raise ValueError("invalid clarification kind")
+            return ClarificationPayload.model_validate(
+                {"prompt": self.prompt, "candidates": list(self.candidates)}
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise UnderstandingProviderError("Malformed clarification result.") from exc
 
 
 @dataclass(frozen=True)
@@ -143,8 +172,10 @@ class _UnderstandingPayload(BaseModel):
     arguments: dict[str, str] | None = None
     recall_window: Literal["recent", "yesterday"] | None = None
     reply: str | None = Field(default=None, max_length=4000)
-    prompt: str | None = Field(default=None, max_length=1000)
-    candidates: list[str] | None = None
+    prompt: str | None = Field(default=None, strict=True, max_length=CLARIFICATION_PROMPT_CHARS)
+    candidates: list[ClarificationCandidate] | None = Field(
+        default=None, strict=True, max_length=CLARIFICATION_CANDIDATE_MAX
+    )
     reason: str | None = Field(default=None, max_length=1000)
     steps: list[ProposedPlanStep] | None = None
     summary: str | None = Field(default=None, max_length=1000)
@@ -187,6 +218,11 @@ class _UnderstandingPayload(BaseModel):
                 scopes=tuple(self.retrieval.scopes),
             )
         if self.kind == "clarification":
+            if any(getattr(self, field) is not None for field in (
+                "action", "reference", "arguments", "recall_window", "steps",
+                "summary", "reply", "reason",
+            )):
+                raise ValueError("clarification cannot carry other proposals")
             return Clarification(
                 kind="clarification",
                 prompt=self.prompt,
@@ -281,10 +317,11 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "enum": ["recent", "yesterday", None],
         },
         "reply": {"type": ["string", "null"], "maxLength": 4000},
-        "prompt": {"type": ["string", "null"], "maxLength": 1000},
+        "prompt": {"type": ["string", "null"], "maxLength": CLARIFICATION_PROMPT_CHARS},
         "candidates": {
             "type": ["array", "null"],
-            "items": {"type": "string"},
+            "maxItems": CLARIFICATION_CANDIDATE_MAX,
+            "items": {"type": "string", "minLength": 1, "maxLength": CLARIFICATION_CANDIDATE_CHARS},
         },
         "reason": {"type": ["string", "null"], "maxLength": 1000},
         "steps": {

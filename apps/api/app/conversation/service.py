@@ -126,6 +126,10 @@ from app.conversation.responder import (
     TemplateResponder,
 )
 from app.conversation.personal_context import PersonalContextRetriever
+from app.conversation.recovery import (
+    MAX_UNDERSTANDING_PASSES, ContextSource, PassKind, UnderstandingPassState,
+    recovery_context,
+)
 from app.conversation.understanding import (
     Clarification,
     ConversationTurn,
@@ -926,66 +930,88 @@ class ConversationService:
         timezone_name: str | None,
         response_language: str,
         fallback: Outcome,
-        retrieved_context: bool = False,
     ) -> Outcome:
         if self._understanding_provider is None:
             return fallback
 
-        try:
-            provider_started = time.perf_counter()
-            include_personal_context = world is not None
-            result = await self._understanding_provider.understand(
-                message=message,
-                world=world,
-                context=self._context_payload(
-                    current_user,
-                    include_personal_context=include_personal_context,
-                    include_general_context=(
-                        not include_personal_context
-                        and is_general_follow_up(message)
-                    ),
-                ),
-                include_personal_context=include_personal_context,
-                response_language=response_language,
-            )
-            if isinstance(result, PersonalContextRequest) and world is None:
-                grounded_world = await self._personal_context.retrieve(current_user, result)
-        except UnderstandingProviderError as exc:
-            logger.warning(
-                "Conversation understanding provider failed: elapsed_ms=%.1f",
-                (time.perf_counter() - provider_started) * 1000,
-                extra={"provider_error_code": exc.code},
-            )
-            if fallback.kind == "no_match":
-                return Outcome(
-                    kind="conversation",
-                    executed=False,
-                    reply="I couldn't answer that right now. Please try again.",
-                )
-            return fallback
-        logger.info(
-            "Conversation understanding provider complete: elapsed_ms=%.1f",
-            (time.perf_counter() - provider_started) * 1000,
+        state = UnderstandingPassState(
+            ContextSource.TRUSTED if world is not None else ContextSource.NONE
         )
-
-        if isinstance(result, PersonalContextRequest):
-            if world is not None:
+        context = self._context_payload(
+            current_user,
+            include_personal_context=world is not None,
+            include_general_context=world is None and is_general_follow_up(message),
+        )
+        for _ in range(MAX_UNDERSTANDING_PASSES):
+            provider_started = time.perf_counter()
+            try:
+                result = await self._understanding_provider.understand(
+                    message=message,
+                    world=world,
+                    context=context,
+                    include_personal_context=world is not None,
+                    response_language=response_language,
+                )
+                if isinstance(result, Clarification):
+                    result.validated()
+                if isinstance(result, PersonalContextRequest) and state.can_retrieve:
+                    world = await self._personal_context.retrieve(current_user, result)
+                    state = state.after_retrieval()
+                    context = self._context_payload(current_user, include_personal_context=True)
+                    continue
+            except UnderstandingProviderError as exc:
+                logger.warning(
+                    "Conversation understanding provider failed: elapsed_ms=%.1f",
+                    (time.perf_counter() - provider_started) * 1000,
+                    extra={"provider_error_code": exc.code},
+                )
+                if state.kind is PassKind.RECOVERY:
+                    self._log_recovery(state, "provider_error", provider_started, fallback_used=True)
+                if fallback.kind == "no_match":
+                    return Outcome(
+                        kind="conversation", executed=False,
+                        reply="I couldn't answer that right now. Please try again.",
+                    )
+                return fallback
+            logger.info(
+                "Conversation understanding provider complete: elapsed_ms=%.1f",
+                (time.perf_counter() - provider_started) * 1000,
+            )
+            if state.kind is PassKind.RECOVERY:
+                self._log_recovery(
+                    state, result.kind, provider_started,
+                    candidate_count=len(result.candidates) if isinstance(result, Clarification) else 0,
+                )
+            if isinstance(result, PersonalContextRequest):
+                # Neither a grounded nor recovery pass may retrieve again.
                 return Outcome(
-                    kind="unsupported",
-                    executed=False,
+                    kind="unsupported", executed=False,
                     reply="I couldn't ground that request in your Rocky data.",
                 )
-            return await self._try_provider(
-                current_user,
-                message,
-                grounded_world,
-                timezone_name,
-                response_language,
-                fallback=fallback,
-                retrieved_context=True,
-            )
+            if isinstance(result, Clarification) and state.kind is not PassKind.RECOVERY:
+                additional_context = None
+                if state.can_recover:
+                    additional_context = recovery_context(
+                        context,
+                        self._context_payload(
+                            current_user, include_personal_context=False,
+                            include_general_context=True,
+                        ),
+                        result,
+                    )
+                if additional_context is not None:
+                    state = state.after_recovery()
+                    context = additional_context
+                    continue
+                self._log_recovery(
+                    state, "clarification", provider_started,
+                    candidate_count=len(result.candidates), attempted=False,
+                )
+            break
+        else:  # State transitions above allow at most three finite passes.
+            raise RuntimeError("Understanding pass budget exhausted")
 
-        if (world is None or retrieved_context) and (
+        if state.context_source is not ContextSource.TRUSTED and (
             isinstance(result, ActionProposal)
             or (
                 isinstance(result, PlanProposal)
@@ -1000,6 +1026,26 @@ class ConversationService:
         )
         await self._remember_outcome(outcome)
         return outcome
+
+    @staticmethod
+    def _log_recovery(
+        state: UnderstandingPassState,
+        result_kind: str,
+        started: float,
+        *,
+        candidate_count: int = 0,
+        attempted: bool = True,
+        fallback_used: bool = False,
+    ) -> None:
+        logger.info("understanding_recovery", extra={
+            "recovery_attempted": attempted,
+            "recovery_source": state.context_source.value,
+            "recovery_result_kind": result_kind,
+            "retrieved_context_present": state.context_source is ContextSource.RETRIEVED,
+            "candidate_count": candidate_count,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "fallback_used": fallback_used,
+        })
 
     async def _outcome_from_understanding(
         self,
@@ -1053,7 +1099,7 @@ class ConversationService:
                 kind="ambiguous",
                 executed=False,
                 candidates=result.candidates,
-                reply=result.prompt,
+                reply=result.prompt or (None if result.candidates else "Could you clarify what you want me to do?"),
             )
 
         if isinstance(result, Unsupported):

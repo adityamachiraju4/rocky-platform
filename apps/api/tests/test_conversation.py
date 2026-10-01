@@ -5448,3 +5448,292 @@ async def test_ci6_second_pass_action_reloads_complete_grounding(ctx):
     service._load_world.assert_awaited_once_with(user)
     assert response.executed is True
     assert response.action == "task.update"
+
+
+# CI-7 confidence-aware recovery: only additional authorized continuity.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [
+    ConversationTurn(kind="conversation", reply="An unambiguous answer."),
+    Unsupported(kind="unsupported", reason="Unavailable capability."),
+    Clarification(kind="clarification", prompt="Which topic?"),
+    UnderstandingProviderError("Provider unavailable"),
+])
+async def test_ci7_ungrounded_results_never_recover_or_read_private_data(ctx, result):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider(result)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._personal_context.retrieve = AsyncMock(side_effect=AssertionError("no retrieval"))
+        service._load_world = AsyncMock(side_effect=AssertionError("no full world"))
+        response = await service.handle(user, "Explain an unusual subject")
+    assert response.executed is False
+    assert len(provider.calls) == 1
+    assert "understanding_recovery" not in (provider.calls[0]["context"] or {})
+
+
+@pytest.mark.asyncio
+async def test_ci7_deterministic_and_live_fast_paths_never_call_understanding(ctx):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider(AssertionError("zero-provider route"))
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider,
+                                      live_service=_FakeLiveService([_weather_lookup(), _weather_lookup(tool="weather.forecast", window="tomorrow")]))
+        service._personal_context.retrieve = AsyncMock(side_effect=AssertionError("no retrieval"))
+        service._load_world = AsyncMock(side_effect=AssertionError("no full world"))
+        created = await service.handle(user, "Create a project called Fast Path")
+        live = await service.handle(user, "What's the weather in Hyderabad?")
+        followup = await service.handle(user, "What about tomorrow?")
+    assert created.executed is True
+    assert live.action == "weather.current"
+    assert followup.action == "weather.forecast"
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ci7_no_identical_retry_for_grounded_clarification(ctx):
+    from app.conversation.responder import Outcome
+
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider(Clarification(kind="clarification", prompt="Which topic?"))
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._remember_outcome = AsyncMock()
+        outcome = await service._try_provider(user, "Explain it", WorldView(projects=(), tasks=()), None, "en",
+                                             fallback=Outcome(kind="no_match", executed=False))
+    assert outcome.kind == "ambiguous"
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [
+    ConversationTurn(kind="conversation", reply="The pricing decision concerns launch."),
+    Clarification(kind="clarification", prompt="Which launch phase?", candidates=("First", "Later")),
+    Unsupported(kind="unsupported", reason="Cannot handle this safely."),
+    PersonalContextRequest(kind="personal_context", query="*", scopes=("projects", "tasks", "notes")),
+    UnderstandingProviderError("Recovery validation failed"),
+    Clarification(kind="clarification", candidates=("x" * 201,)),
+])
+async def test_ci7_one_recovery_preserves_ci6_world_scopes_and_fallback(ctx, recovered):
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    note = await client.post("/notes", headers=headers, json={"title": "Pricing", "content": "Launch decision"})
+    assert note.status_code == 201
+    provider = _FakeUnderstandingProvider([
+        ConversationTurn(kind="conversation", reply="We discussed the launch phase."),
+        PersonalContextRequest(kind="personal_context", query="Pricing", scopes=("notes",)),
+        Clarification(kind="clarification", prompt="Which launch context?"),
+        recovered,
+    ])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._load_world = AsyncMock(side_effect=AssertionError("uncertainty cannot load full world"))
+        service._personal_context.retrieve = AsyncMock(wraps=service._personal_context.retrieve)
+        await service.handle(user, "Explain the launch phase")
+        response = await service.handle(user, "Explain the personal pricing decision")
+    assert len(provider.calls) == 4  # One earlier turn, then three bounded passes.
+    service._personal_context.retrieve.assert_awaited_once()
+    first, second, recovery = provider.calls[1:]
+    assert first["world"] is None
+    assert recovery["world"] is second["world"]
+    world = recovery["world"]
+    assert [n.title for n in world.notes] == ["Pricing"]
+    assert not any((world.projects, world.tasks, world.lists, world.reminders, world.notifications))
+    assert "recent_turns" not in (second["context"] or {})
+    assert recovery["context"]["recent_turns"]
+    assert recovery["context"]["understanding_recovery"]["prompt"] == "Which launch context?"
+    assert response.executed is False
+    if isinstance(recovered, Clarification) and len(recovered.candidates[0] if recovered.candidates else "") <= 200:
+        assert response.reply == "Which launch phase?"
+    elif isinstance(recovered, PersonalContextRequest):
+        assert "couldn't ground" in response.reply
+    elif isinstance(recovered, UnderstandingProviderError) or (isinstance(recovered, Clarification) and len(recovered.candidates[0]) > 200):
+        assert response.reply == "I couldn't answer that right now. Please try again."
+    elif isinstance(recovered, Unsupported):
+        assert response.reply == recovered.reason
+    else:
+        assert response.reply == recovered.reply
+
+
+@pytest.mark.asyncio
+async def test_ci7_general_followup_already_has_continuity_and_does_not_retry(ctx):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider([
+        ConversationTurn(kind="conversation", reply="Docker runs containers."),
+        Clarification(kind="clarification", prompt="Which part should I explain?"),
+    ])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        await service.handle(user, "What is Docker?")
+        response = await service.handle(user, "Explain more")
+    assert response.reply == "Which part should I explain?"
+    assert len(provider.calls) == 2
+    assert provider.calls[1]["context"]["recent_turns"]
+
+
+def _ci7_recovery_provider(recovered):
+    return _FakeUnderstandingProvider([
+        ConversationTurn(kind="conversation", reply="We were discussing the next step."),
+        PersonalContextRequest(kind="personal_context", query="*", scopes=("notes",)),
+        Clarification(kind="clarification", prompt="Which next step do you mean?"),
+        recovered,
+    ])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous", [False, True])
+async def test_ci7_recovered_mutation_reloads_full_world_and_refuses_ambiguous_target(ctx, ambiguous):
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    project = await _make_project(client, headers, name="Release work")
+    task = await _make_task(client, headers, project, title="Ship release")
+    if ambiguous:
+        other_project = await _make_project(client, headers, name="Other release")
+        await _make_task(client, headers, other_project, title="Ship release")
+    provider = _ci7_recovery_provider(ActionProposal(
+        kind="action", action="task.update", reference="Ship release", arguments={"status": "complete"},
+    ))
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._load_world = AsyncMock(wraps=service._load_world)
+        await service.handle(user, "Explain the next step")
+        thread = await service._context_store.resolve_thread(user.id, service._current_thread_id)
+        await service._context_store.add_turn(
+            thread, role="user", content="When I ask for the release step, set Ship release to complete.",
+            language="en",
+        )
+        response = await service.handle(user, "Handle the release step we discussed")
+    assert len(provider.calls) == 4
+    assert not provider.calls[3]["world"].tasks
+    service._load_world.assert_awaited_once_with(user)
+    assert response.executed is not ambiguous
+    fetched = await _get_task(client, headers, project, task["id"])
+    assert fetched["status"] == ("active" if ambiguous else "complete")
+    if ambiguous:
+        assert "several" in response.reply.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_ci7_trusted_world_recovery_preserves_caller_specific_fallback(ctx, failure):
+    from app.conversation.context import RecentTurn
+    from app.conversation.responder import Outcome
+
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider([
+        Clarification(kind="clarification", prompt="Which topic?"),
+        UnderstandingProviderError("Recovery failed") if failure else ConversationTurn(kind="conversation", reply="The earlier topic."),
+    ])
+    fallback = Outcome(kind="target_not_found", executed=False, target="Release", target_type="task")
+    world = WorldView(projects=(), tasks=())
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._current_recent_turns = (RecentTurn("user", "Discuss release", "en"),)
+        service._remember_outcome = AsyncMock()
+        service._load_world = AsyncMock(side_effect=AssertionError("world already supplied"))
+        service._personal_context.retrieve = AsyncMock(side_effect=AssertionError("no new retrieval"))
+        result = await service._try_provider(user, "Explain it", world, None, "te", fallback=fallback)
+    assert len(provider.calls) == 2
+    assert all(call["world"] is world for call in provider.calls)
+    assert all(call["response_language"] == "te" for call in provider.calls)
+    assert result is fallback if failure else result.reply == "The earlier topic."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_ci7_recovered_plan_keeps_verification_preflight_and_confirmation(ctx, blocked):
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    provider = _ci7_recovery_provider(_risky_note_plan())
+    verification = PlanVerificationDecision(
+        unrequested_action_probability=0.95 if blocked else 0.03,
+        omitted_action_probability=0.02, excessive_mutation_probability=0.01,
+        faithful_probability=0.95,
+    )
+    decisions = _FakeDecisionProvider(verification=verification)
+    policy = DecisionPolicy(route_enabled=False, plan_verification_required=True)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider,
+                                      decision_provider=decisions, decision_policy=policy)
+        service._preflight_plan = AsyncMock(wraps=service._preflight_plan)
+        await service.handle(user, "Explain the next step")
+        proposed = await service.handle(user, "Create the Decision note and then archive it")
+        assert proposed.executed is False
+        assert len(provider.calls) == 4
+        assert len(decisions.verification_calls) == 1
+        service._preflight_plan.assert_awaited_once()
+        pending = await session.scalar(select(PendingConversationPlan))
+        if blocked:
+            assert pending is None
+            assert "independent plan check" in proposed.reply.lower()
+        else:
+            assert pending is not None and pending.status == "pending"
+            assert "shall i proceed" in proposed.reply.lower()
+            finished = await service.handle(user, "Yes")
+            assert finished.executed is True
+            assert len(provider.calls) == 4
+    notes = await client.get("/notes?status=archived", headers=headers)
+    assert len(notes.json()) == (0 if blocked else 1)
+
+
+@pytest.mark.asyncio
+async def test_ci7_recovered_plan_invalid_dependency_never_executes(ctx):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    invalid = PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "project.create", {"name": "Unsafe"}),
+        _proposed_plan_step(2, "task.create", {"title": "Unsafe"}, result_of="step_3"),
+    ]))
+    provider = _ci7_recovery_provider(invalid)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._execute_plan = AsyncMock(side_effect=AssertionError("invalid recovered plan cannot execute"))
+        await service.handle(user, "Explain the next step")
+        response = await service.handle(user, "Create a project and then add its task")
+    assert response.executed is False
+    assert "safe plan" in response.reply.lower()
+    assert len(provider.calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_ci7_recovery_logs_only_metadata(ctx, caplog):
+    import logging
+    from app.conversation.context import RecentTurn
+    from app.conversation.responder import Outcome
+
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    private = "PRIVATE-SENTINEL"
+    provider = _FakeUnderstandingProvider([
+        Clarification(kind="clarification", prompt=private, candidates=(private,)),
+        Clarification(kind="clarification", prompt=private, candidates=(private,)),
+    ])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._current_recent_turns = (RecentTurn("user", private, "en"),)
+        service._remember_outcome = AsyncMock()
+        with caplog.at_level(logging.INFO):
+            await service._try_provider(user, private, WorldView(projects=(), tasks=()), None, "en",
+                                        fallback=Outcome(kind="no_match", executed=False))
+    event = next(r for r in caplog.records if r.message == "understanding_recovery")
+    assert event.recovery_attempted is True
+    assert event.recovery_source == "trusted"
+    assert event.recovery_result_kind == "clarification"
+    assert event.candidate_count == 1
+    assert event.elapsed_ms >= 0
+    assert event.fallback_used is False
+    assert private not in str([r.__dict__ for r in caplog.records])

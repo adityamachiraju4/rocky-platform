@@ -162,3 +162,77 @@ No database migration or public API change is required. Service-returned
 candidates are scanned in memory; model context is bounded, but database reads
 and scan cost are not bounded in v1. Large accounts may warrant paginated owned
 search in a later iteration.
+
+## CI-7: confidence-aware understanding recovery
+
+CI-7 uses `Clarification` for insufficient information, without introducing a
+global confidence score. Resolver ambiguity, TypeSafe/JEV confirmation
+confidence, and independent plan-verification probabilities keep their existing
+separate policies. `Unsupported` is terminal and never triggers recovery.
+
+Understanding runs through explicit typed state tracking the pass kind
+(normal, CI-6 retrieved, CI-7 recovery) and world source (none, complete trusted,
+bounded retrieved). A turn has at most three understanding calls: one initial
+call, at most one CI-6 retrieval-grounded call, and at most one CI-7 recovery
+call. The loop is finite; there is no recursive retry. No retrieval is permitted
+once a world is supplied or once recovery begins, including when the supplied
+world is empty.
+
+Recovery requires all of the following:
+
+- The provider returned a valid `Clarification`.
+- A world has already been authorized and supplied by CI-6 or a deterministic
+  reference-dependent path.
+- Recovery has not already been attempted for this turn.
+- Already-loaded, owned, same-thread continuity adds information omitted from
+  that provider pass: recent conversation turns or the prior message/reply.
+
+Current grounded passes include durable entity references but omit recent-turn
+continuity; recovery supplies that omitted continuity with the prior
+clarification. Ungrounded passes return clarification directly. General
+follow-ups already include continuity and receive no retry with identical
+information. An already-supplied WorldView by itself does not justify another
+call. Recovery adds no domain reads, complete-world loading, broader CI-6
+scopes, embeddings/vector search, or live lookup. Conversation transcripts are
+separate from retrieved records and remain untrusted data, never execution
+authority. Recent continuity is capped again at 12 turns and 6,000 content
+characters; the prior message and reply are each capped at 2,000 characters.
+
+Clarification retains the public result shape: optional prompt (maximum 1,000
+characters) and optional candidates (maximum 5 alternatives, each 1–200
+characters). Five short options keep the existing concise clarification UX.
+The provider JSON schema and strict Pydantic validation share these named
+bounds. Clarification cannot carry non-null action, reference, arguments,
+recall, plan, retrieval, conversation-reply or unsupported-reason fields.
+Malformed results use `UnderstandingProviderError` and the existing
+caller-specific fallback. Nullable unused fields remain valid. These provider
+bounds do not truncate authoritative deterministic reference ambiguity.
+A clarification without prompt or candidates gets a generic request to clarify.
+
+The recovery provider is instructed to resolve only the missing distinction
+from the additional context. Uncertain mutation intent, target, arguments or
+plan steps/order must remain clarification; it must never choose a best guess.
+A second clarification returns directly to the user; unsupported stays
+unsupported; provider failure uses the existing fallback. A recovery request
+for personal context is rejected without calling the retriever.
+
+Unambiguous recovered action/plan proposals have no special authority. They go
+through the same registry and argument validation, complete owned grounding
+where required, reference resolution, plan compiler and preflight, independent
+TypeSafe/JEV verification, confirmation policy and execution runtime. In
+particular, partial CI-6 worlds are replaced with complete grounding before
+reference-dependent action/plan resolution. Ambiguous mutation targets remain
+non-executing. Pending confirmation, thread persistence, response language,
+durable references, CI-5 temporal/live behavior and public API responses are
+unchanged. No migration is required.
+
+`understanding_recovery` logs only whether recovery was attempted, world-source
+category, result kind, whether CI-6 retrieved context was present, candidate
+count, elapsed time and fallback use. They contain no message, prompt,
+candidate strings, retrieval query, or personal record contents.
+
+V1 deliberately does not recover ungrounded clarification or repeat calls when
+no additional authorized continuity is available. It does not introduce an
+independent numerical confidence evaluator for understanding. The provider
+must report remaining interpretation uncertainty as clarification; Rocky's
+existing grounding and execution boundaries remain authoritative.
