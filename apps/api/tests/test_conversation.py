@@ -2757,6 +2757,13 @@ async def test_live_follow_up_skips_worldview_and_jev(
             live_service=live,
             decision_provider=decisions,
         )
+        for domain, method in [
+            (service._projects, "list_projects"), (service._tasks, "list_tasks"),
+            (service._reminders, "list_reminders"), (service._notifications, "list_notifications"),
+            (service._notes, "list_notes"), (service._lists, "list_lists"), (service._lists, "list_items"),
+        ]:
+            setattr(domain, method, AsyncMock(side_effect=AssertionError("live must not read private domains")))
+        service._personal_context.retrieve = AsyncMock(side_effect=AssertionError("live must not retrieve"))
         await service.handle(user, "What's the weather in Hyderabad?")
         response = await service.handle(user, "What about tomorrow?")
 
@@ -3138,7 +3145,7 @@ async def test_general_question_does_not_send_grounded_personal_context(ctx) -> 
 async def test_personal_general_hybrid_may_send_bounded_rocky_context(ctx) -> None:
     provider = _use_fake_provider(
         [
-            PersonalContextRequest(kind="personal_context"),
+            PersonalContextRequest(kind="personal_context", query="*", scopes=("tasks",)),
             ConversationTurn(
                 kind="conversation",
                 reply="Start with the highest-impact active task.",
@@ -5322,3 +5329,122 @@ async def test_context_store_bounds_retained_and_prompt_turns(ctx) -> None:
 
 # A stub conforming to the Resolver Protocol, asserted structurally.
 _PROTOCOL_CHECK: Resolver = _RogueResolver()
+
+
+# CI-6 query-specific personal retrieval and its privacy boundary.
+@pytest.mark.asyncio
+async def test_ci6_second_pass_is_query_specific_and_owner_scoped(ctx):
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    other_headers, _ = await _auth_headers(client, sessionmaker)
+    for auth, title, content in [
+        (headers, "Pricing decision", "PhantomRed pricing: launch at 20."),
+        (headers, "Groceries", "Buy apples."),
+        (other_headers, "PhantomRed pricing", "Other user's private decision."),
+    ]:
+        created = await client.post("/notes", headers=auth, json={"title": title, "content": content})
+        assert created.status_code == 201, created.text
+    provider = _FakeUnderstandingProvider([
+        PersonalContextRequest(kind="personal_context", query="PhantomRed pricing", scopes=("notes",)),
+        ConversationTurn(kind="conversation", reply="You decided on 20."),
+    ])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        original_list_notes = service._notes.list_notes
+
+        async def list_notes_after_first_pass(*args, **kwargs):
+            assert len(provider.calls) == 1
+            return await original_list_notes(*args, **kwargs)
+
+        service._notes.list_notes = list_notes_after_first_pass
+        service._load_world = AsyncMock(side_effect=AssertionError("CI-6 must not load broad world"))
+        service._projects.list_projects = AsyncMock(side_effect=AssertionError("unrequested scope"))
+        response = await service.handle(user, "What did I decide about PhantomRed pricing?")
+    assert response.reply == "You decided on 20."
+    assert provider.calls[0]["world"] is None
+    world = provider.calls[1]["world"]
+    assert [note.title for note in world.notes] == ["Pricing decision"]
+    assert world.notes[0].content == "PhantomRed pricing: launch at 20."
+    assert not any((world.projects, world.tasks, world.reminders, world.notifications, world.lists))
+
+
+@pytest.mark.asyncio
+async def test_ci6_repeated_request_fails_closed_without_more_retrieval(ctx):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    request = PersonalContextRequest(kind="personal_context", query="*", scopes=("notes",))
+    provider = _FakeUnderstandingProvider([request, request])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._personal_context.retrieve = AsyncMock(return_value=WorldView(projects=(), tasks=()))
+        response = await service.handle(user, "What decisions have I made?")
+    service._personal_context.retrieve.assert_awaited_once_with(user, request)
+    assert len(provider.calls) == 2
+    assert "couldn't ground" in response.reply
+    assert response.executed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_pass", [
+    ConversationTurn(kind="conversation", reply="A general answer."),
+    PersonalContextRequest(kind="personal_context", query="*", scopes=("unknown",)),
+    UnderstandingProviderError("Malformed understanding result."),
+])
+async def test_ci6_general_or_malformed_first_pass_does_not_read_domains(ctx, first_pass):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider(first_pass)
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        for domain, method in [
+            (service._projects, "list_projects"), (service._tasks, "list_tasks"),
+            (service._reminders, "list_reminders"), (service._notifications, "list_notifications"),
+            (service._notes, "list_notes"), (service._lists, "list_lists"), (service._lists, "list_items"),
+        ]:
+            setattr(domain, method, AsyncMock(side_effect=AssertionError("first pass must not read private domains")))
+        response = await service.handle(user, "Explain an unusual topic")
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["world"] is None
+    assert response.reply == ("A general answer." if isinstance(first_pass, ConversationTurn) else "I couldn't answer that right now. Please try again.")
+
+
+@pytest.mark.asyncio
+async def test_ci6_personal_route_classifier_defers_to_first_pass(ctx):
+    client, sessionmaker = ctx
+    _, user_id = await _auth_headers(client, sessionmaker)
+    provider = _FakeUnderstandingProvider(ConversationTurn(kind="conversation", reply="Clarify the subject."))
+    decisions = _FakeDecisionProvider(route=RouteDecision(RouteKind.PERSONAL_CONTEXT, 0.99, {"personal_context": 0.99}))
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider, decision_provider=decisions)
+        service._load_world = AsyncMock(side_effect=AssertionError("classifier cannot load private data"))
+        service._personal_context.retrieve = AsyncMock(side_effect=AssertionError("no typed retrieval request"))
+        response = await service.handle(user, "Tell me about my unusual request")
+    assert decisions.route_calls
+    assert provider.calls[0]["world"] is None
+    assert response.reply == "Clarify the subject."
+
+
+@pytest.mark.asyncio
+async def test_ci6_second_pass_action_reloads_complete_grounding(ctx):
+    client, sessionmaker = ctx
+    headers, user_id = await _auth_headers(client, sessionmaker)
+    project_id = await _make_project(client, headers, name="Work")
+    await _make_task(client, headers, project_id, title="Release")
+    provider = _FakeUnderstandingProvider([
+        PersonalContextRequest(kind="personal_context", query="unrelated", scopes=("notes",)),
+        ActionProposal(kind="action", action="task.update", reference="Release", arguments={"status": "complete"}),
+    ])
+    async with sessionmaker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        original = service._load_world
+        service._load_world = AsyncMock(wraps=original)
+        response = await service.handle(user, "Help me choose a next step")
+    assert not provider.calls[1]["world"].tasks
+    service._load_world.assert_awaited_once_with(user)
+    assert response.executed is True
+    assert response.action == "task.update"

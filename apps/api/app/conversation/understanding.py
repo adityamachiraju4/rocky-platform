@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.conversation import registry
 from app.conversation.plans.base import ProposedPlan, ProposedPlanStep
@@ -47,6 +47,32 @@ class ConversationTurn:
     reference: str | None = None
 
 
+PERSONAL_QUERY_MAX = 200
+PersonalScope = Literal["projects", "tasks", "reminders", "notifications", "notes", "lists"]
+PERSONAL_SCOPES = ("projects", "tasks", "reminders", "notifications", "notes", "lists")
+
+
+class PersonalRetrievalPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: str = Field(min_length=1, max_length=PERSONAL_QUERY_MAX)
+    scopes: list[PersonalScope] = Field(min_length=1, max_length=6)
+
+    @field_validator("query")
+    @classmethod
+    def nonblank_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value.strip()
+
+    @field_validator("scopes")
+    @classmethod
+    def unique_scopes(cls, value: list[PersonalScope]) -> list[PersonalScope]:
+        if len(set(value)) != len(value):
+            raise ValueError("scopes must be unique")
+        return value
+
+
 @dataclass(frozen=True)
 class PersonalContextRequest:
     """Route decision requesting a second, grounded understanding pass.
@@ -58,6 +84,15 @@ class PersonalContextRequest:
     """
 
     kind: Literal["personal_context"]
+    query: str
+    scopes: tuple[PersonalScope, ...]
+
+    def validated(self) -> PersonalRetrievalPayload:
+        if self.kind != "personal_context":
+            raise ValueError("invalid retrieval kind")
+        return PersonalRetrievalPayload.model_validate(
+            {"query": self.query, "scopes": list(self.scopes)}
+        )
 
 
 @dataclass(frozen=True)
@@ -113,8 +148,11 @@ class _UnderstandingPayload(BaseModel):
     reason: str | None = Field(default=None, max_length=1000)
     steps: list[ProposedPlanStep] | None = None
     summary: str | None = Field(default=None, max_length=1000)
+    retrieval: PersonalRetrievalPayload | None = None
 
     def to_result(self) -> UnderstandingResult:
+        if self.kind != "personal_context" and self.retrieval is not None:
+            raise ValueError("retrieval belongs only to personal_context")
         if self.kind == "action":
             if not self.action:
                 raise ValueError("action result missing action")
@@ -137,7 +175,17 @@ class _UnderstandingPayload(BaseModel):
                 reference=self.reference,
             )
         if self.kind == "personal_context":
-            return PersonalContextRequest(kind="personal_context")
+            if any(getattr(self, field) is not None for field in (
+                "action", "reference", "arguments", "recall_window", "reply",
+                "prompt", "candidates", "reason", "steps", "summary",
+            )):
+                raise ValueError("personal_context cannot carry other proposals")
+            if self.retrieval is None:
+                raise ValueError("personal_context requires retrieval")
+            return PersonalContextRequest(
+                kind="personal_context", query=self.retrieval.query,
+                scopes=tuple(self.retrieval.scopes),
+            )
         if self.kind == "clarification":
             return Clarification(
                 kind="clarification",
@@ -246,6 +294,20 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
             "items": _model_plan_step_schema(),
         },
         "summary": {"type": ["string", "null"], "maxLength": 1000},
+        "retrieval": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "maxLength": PERSONAL_QUERY_MAX},
+                        "scopes": {"type": "array", "minItems": 1, "maxItems": 6,
+                                   "items": {"type": "string", "enum": list(PERSONAL_SCOPES)}},
+                    },
+                    "required": ["query", "scopes"],
+                },
+            ],
+        },
     },
     "required": [
         "kind",
@@ -259,6 +321,7 @@ UNDERSTANDING_JSON_SCHEMA: dict[str, Any] = {
         "reason",
         "steps",
         "summary",
+        "retrieval",
     ],
 }
 
@@ -270,41 +333,41 @@ def safe_world_payload(world: WorldView) -> dict[str, Any]:
         "allowed_actions": list(registry.ACTION_NAMES),
         "action_catalog": list(registry.model_catalog()),
         "projects": [
-            {"name": p.name}
+            {"name": p.name[:200]}
             for p in world.projects[:25]
         ],
         "tasks": [
             {
-                "title": t.title,
-                "project": t.project_name,
+                "title": t.title[:200],
+                "project": t.project_name[:200],
                 "status": t.status,
             }
             for t in world.tasks[:50]
         ],
         "reminders": [
             {
-                "title": reminder.title,
+                "title": reminder.title[:200],
                 "status": reminder.status,
                 "due_at": reminder.due_at.isoformat(),
-                "timezone": reminder.timezone,
+                "timezone": reminder.timezone[:100],
             }
             for reminder in world.reminders[:50]
         ],
         "notifications": [
-            {"title": item.title, "body": item.body, "status": item.status}
+            {"title": item.title[:200], "body": item.body[:1000], "status": item.status}
             for item in world.notifications[:50]
         ],
         "notes": [
-            {"title": note.title, "status": note.status}
+            {"title": note.title[:200], "content": note.content[:1000], "status": note.status}
             for note in world.notes[:50]
         ],
         "lists": [
             {
-                "title": value.title,
+                "title": value.title[:200],
                 "status": value.status,
                 "items": [
-                    {"content": item.content, "status": item.status}
-                    for item in value.items[:50]
+                    {"content": item.content[:1000], "status": item.status}
+                    for item in value.items[:8]
                 ],
             }
             for value in world.lists[:25]

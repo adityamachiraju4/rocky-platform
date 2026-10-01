@@ -125,6 +125,7 @@ from app.conversation.responder import (
     Responder,
     TemplateResponder,
 )
+from app.conversation.personal_context import PersonalContextRetriever
 from app.conversation.understanding import (
     Clarification,
     ConversationTurn,
@@ -287,6 +288,10 @@ class ConversationService:
         self._notifications = NotificationsService(session, clock=clock)
         self._notes = NotesService(session, clock=clock)
         self._lists = ListsService(session, clock=clock)
+        self._personal_context = PersonalContextRetriever(
+            projects=self._projects, tasks=self._tasks, reminders=self._reminders,
+            notifications=self._notifications, notes=self._notes, lists=self._lists,
+        )
         # Resolver is injectable so tests can pin behavior; defaults to the
         # deterministic v1 brain.
         self._resolver: Resolver = resolver or HardcodedResolver()
@@ -921,6 +926,7 @@ class ConversationService:
         timezone_name: str | None,
         response_language: str,
         fallback: Outcome,
+        retrieved_context: bool = False,
     ) -> Outcome:
         if self._understanding_provider is None:
             return fallback
@@ -942,6 +948,8 @@ class ConversationService:
                 include_personal_context=include_personal_context,
                 response_language=response_language,
             )
+            if isinstance(result, PersonalContextRequest) and world is None:
+                grounded_world = await self._personal_context.retrieve(current_user, result)
         except UnderstandingProviderError as exc:
             logger.warning(
                 "Conversation understanding provider failed: elapsed_ms=%.1f",
@@ -967,7 +975,6 @@ class ConversationService:
                     executed=False,
                     reply="I couldn't ground that request in your Rocky data.",
                 )
-            grounded_world = await self._load_world(current_user)
             return await self._try_provider(
                 current_user,
                 message,
@@ -975,9 +982,10 @@ class ConversationService:
                 timezone_name,
                 response_language,
                 fallback=fallback,
+                retrieved_context=True,
             )
 
-        if world is None and (
+        if (world is None or retrieved_context) and (
             isinstance(result, ActionProposal)
             or (
                 isinstance(result, PlanProposal)
@@ -2262,7 +2270,9 @@ class ConversationService:
         if decision is None:
             return None
         if decision.kind is RouteKind.PERSONAL_CONTEXT:
-            return await self._load_world(current_user)
+            # Routing alone cannot describe a safe retrieval scope. The first
+            # understanding pass must supply the typed query and scopes.
+            return None
         if decision.kind is RouteKind.LIVE:
             return Outcome(
                 kind="conversation",

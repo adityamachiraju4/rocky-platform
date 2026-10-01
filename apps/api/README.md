@@ -87,3 +87,78 @@ deterministic private capability
 
 The private capability registry remains the trust boundary for mutations.
 Live tools have their own closed read-only registry and strict schemas.
+
+## CI-6: query-specific personal context
+
+Conversation starts with an empty WorldView. Deterministic zero-private-data
+routes, live lookup, and durable live follow-ups run without personal domain
+reads. A route classifier's personal-context decision only defers to the first
+understanding pass; it cannot load a world itself. The first understanding pass
+omits `rocky_world`. To answer from personal data, understanding must return:
+
+```json
+{
+  "kind": "personal_context",
+  "retrieval": {
+    "query": "PhantomRed pricing",
+    "scopes": ["notes", "lists"]
+  }
+}
+```
+
+This example omits the other nullable fields in the full provider schema.
+`retrieval` is null for other result kinds. Its object forbids extra fields,
+requires a nonblank string query of 1–200 characters, and requires 1–6 unique
+scopes from `projects`, `tasks`, `reminders`, `notifications`, `notes`, `lists`.
+The internal frozen `PersonalContextRequest` contains `kind`, `query`, and a
+scope tuple. Missing retrieval, invalid scopes, duplicate scopes, wrong types,
+and oversized queries raise `UnderstandingProviderError` and use the existing
+provider-error fallback. Invalid requests never broaden into all-data retrieval.
+
+Use the literal query `*` for an explicit overview of the requested categories
+(e.g. current tasks or reminders). Other queries exclude records with no lexical
+match. Rocky's `PersonalContextRetriever` calls authoritative domain services
+with `current_user`; the provider never accesses repositories or the database.
+Tasks require owned project enumeration, but project records only enter the
+second-pass world if `projects` was requested. No other unrequested categories
+are read. Existing ownership policies remain authoritative.
+
+Ranking normalizes Unicode with NFKC, case-folds, and splits into word tokens.
+Records sort lexicographically by exact normalized title, whole title phrase,
+number of query tokens in the title, then number in body/context. Notes match
+content, notifications match body, tasks match project name, and lists match
+item content. Equal relevance favors active tasks/notes/lists, scheduled or due
+reminders, and unread notifications. Reminder ties use earliest due time;
+notification ties use newest creation time. Stable entity IDs break remaining
+ties. Notes/lists include both active and archived records; reminders and
+notifications include all supported statuses. Projects have no status signal
+in WorldView. Task due dates and priorities are not available and are not inferred.
+There are no temporal request hints or semantic/vector retrieval in v1.
+
+Named retrieval limits are 8 records per scope, 48 top-level records total,
+8 items per selected list (at most 64 items in addition to the 48 records),
+200 characters per title/project name, 1,000 per note/notification/item content,
+and 100 per timezone. List items sort by lexical relevance, active status, and
+stable ID. Text truncation retains the deterministic leading prefix, so a match
+late in a large body may be found without its full passage appearing in context.
+`safe_world_payload()` independently caps broad worlds at 25 projects, 50 each
+of tasks/reminders/notifications/notes, 25 lists with 8 items each, and the same
+text limits. It serializes no ownership IDs or internal metadata; note content
+is included so the second pass can answer about decisions.
+
+The bounded retrieved world goes to exactly one second understanding pass.
+A repeated personal-context request fails closed, including when retrieval was
+empty. If that pass proposes an action, a plan requiring references, or a task
+reference, complete owned grounding is loaded before validation/resolution.
+Deterministic reference retries, action grounding, and plan preflight/execution
+retain complete worlds to avoid hiding ambiguity. Existing recent turns,
+grounded references, prior results, pending confirmation, activity recall,
+place/live subject continuity, and temporal handling remain separate systems.
+
+Retrieval logs contain requested scopes, selected counts, duration, and whether
+a specific query or category overview was used. Invalid requests log a failure
+classification. Queries and personal text are never logged by the retriever.
+No database migration or public API change is required. Service-returned
+candidates are scanned in memory; model context is bounded, but database reads
+and scan cost are not bounded in v1. Large accounts may warrant paginated owned
+search in a later iteration.
