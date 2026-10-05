@@ -119,6 +119,7 @@ class OpenAIUnderstandingProvider:
         api_key: str,
         model: str,
         timeout_seconds: float,
+        base_url: str | None = None,
     ) -> None:
         try:
             from openai import AsyncOpenAI
@@ -127,7 +128,13 @@ class OpenAIUnderstandingProvider:
                 "OpenAI SDK is not installed."
             ) from exc
 
-        self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds)
+        client_options: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout_seconds,
+        }
+        if base_url is not None:
+            client_options["base_url"] = base_url
+        self._client = AsyncOpenAI(**client_options)
         self._model = model
         self.last_error_code: str | None = None
 

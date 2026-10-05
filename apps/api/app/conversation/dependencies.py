@@ -41,6 +41,7 @@ def get_understanding_provider() -> UnderstandingProvider | None:
             api_key=api_key,
             model=settings.get_openai_model(),
             timeout_seconds=settings.get_openai_timeout_seconds(),
+            base_url=settings.get_openai_base_url(),
         )
     except UnderstandingProviderError as exc:
         logger.warning(

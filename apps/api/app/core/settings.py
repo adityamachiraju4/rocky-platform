@@ -232,6 +232,11 @@ def get_openai_api_key() -> str | None:
     return raw
 
 
+def get_openai_base_url() -> str | None:
+    raw = os.getenv("OPENAI_BASE_URL")
+    return raw if raw and raw.strip() else None
+
+
 def get_openai_model() -> str:
     return os.getenv("OPENAI_MODEL") or _DEFAULT_OPENAI_MODEL
 
@@ -611,6 +616,7 @@ __all__ = [
     "get_password_reset_ttl",
     "get_email_verification_cooldown",
     "get_openai_api_key",
+    "get_openai_base_url",
     "get_openai_model",
     "get_openai_timeout_seconds",
     "get_typesafe_enabled",

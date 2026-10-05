@@ -5737,3 +5737,61 @@ async def test_ci7_recovery_logs_only_metadata(ctx, caplog):
     assert event.elapsed_ms >= 0
     assert event.fallback_used is False
     assert private not in str([r.__dict__ for r in caplog.records])
+
+@pytest.mark.parametrize("base_url", [None, "", " \t\n", "https://openrouter.ai/api/v1"])
+def test_understanding_provider_base_url_configuration(monkeypatch, base_url):
+    import openai
+    from app.core import settings
+
+    if base_url is None:
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "7.5")
+    calls = []
+    client = object()
+
+    def construct_client(**kwargs):
+        calls.append(kwargs)
+        return client
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", construct_client)
+    provider = get_understanding_provider()
+    expected = {"api_key": "test-key", "timeout": 7.5}
+    configured = base_url if base_url and base_url.strip() else None
+    if configured is not None:
+        expected["base_url"] = configured
+    assert settings.get_openai_base_url() == configured
+    assert "get_openai_base_url" in settings.__all__
+    assert isinstance(provider, OpenAIUnderstandingProvider)
+    assert provider._client is client
+    assert provider._model == "test-model"
+    assert calls == [expected]
+
+
+def test_understanding_provider_constructor_default_base_url(monkeypatch):
+    import openai
+
+    calls = []
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kwargs: calls.append(kwargs))
+    OpenAIUnderstandingProvider(api_key="test-key", model="test-model", timeout_seconds=4.0)
+    assert calls == [{"api_key": "test-key", "timeout": 4.0}]
+
+
+@pytest.mark.parametrize("base_url", [None, "https://openrouter.ai/api/v1"])
+def test_understanding_provider_base_url_without_api_key(monkeypatch, base_url):
+    import openai
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if base_url is None:
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+
+    def unexpected_client(**kwargs):
+        pytest.fail("SDK client must not be constructed without an API key")
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", unexpected_client)
+    assert get_understanding_provider() is None

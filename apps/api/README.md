@@ -40,7 +40,11 @@ Run the Alembic commands whenever migrations change.
 ## Provider Configuration
 
 Core assistant:
-- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS`
+
+`OPENAI_BASE_URL` is optional; unset or blank values preserve the OpenAI SDK
+default endpoint. OpenAI-compatible providers such as OpenRouter can be
+configured by setting `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 
 Speech:
 - Local STT defaults to faster-whisper `small`.
