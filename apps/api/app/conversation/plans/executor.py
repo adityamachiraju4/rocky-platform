@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.conversation.actions.base import ActionResult, GroundedResultReference
+from app.conversation.actions.base import ActionDomain, ActionResult, GroundedResultReference
 from app.conversation.plans.base import (
     ExecutablePlan,
     ExecutablePlanStep,
@@ -49,7 +49,7 @@ class PlanExecutor:
                 logger.warning(
                     "Plan step failed",
                     extra={"plan_id": str(plan.id), "step_id": step.id, "action": step.definition.name},
-                    exc_info=True,
+                    exc_info=step.definition.grounder is not ActionDomain.MEMORY,
                 )
                 step_results.append(
                     PlanStepResult(step.id, step.definition.name, "failed", failure=type(exc).__name__)
@@ -82,7 +82,7 @@ class PlanExecutor:
                         "plan_id": str(plan.id), "step_id": step.id,
                         "action": step.definition.name,
                     },
-                    exc_info=True,
+                    exc_info=step.definition.grounder is not ActionDomain.MEMORY,
                 )
                 step_results.append(
                     PlanStepResult(

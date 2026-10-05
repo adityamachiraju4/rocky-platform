@@ -26,6 +26,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -52,6 +53,13 @@ from app.reminders.service import RemindersService
 from app.notifications.service import NotificationsService
 from app.notes.schemas import NoteCreate, NoteUpdate
 from app.notes.service import NotesService
+from app.memories.service import MemoriesService
+from app.memories.schemas import MemoryCreate, MemoryUpdate
+from app.memories.exceptions import MemoryNotFoundError, InvalidMemoryTransitionError
+from app.conversation.memory_intent import explicit_memory_operation
+from app.conversation.plans.memory_confirmation import MemoryForgetPlan
+from app.conversation.plans.base import ProposedPlanStep
+from app.conversation.resolver import MemoryRef
 from app.lists.schemas import ListCreate, ListItemCreate, ListItemUpdate, ListUpdate
 from app.lists.service import ListsService
 from app.live import registry as live_registry
@@ -252,6 +260,10 @@ ACTION_EXECUTOR_METHODS: dict[ExecutorKey, str] = {
     ExecutorKey.NOTIFICATION_LIST: "_execute_notification_list",
     ExecutorKey.NOTIFICATION_READ: "_execute_notification_read",
     ExecutorKey.NOTIFICATION_DISMISS: "_execute_notification_dismiss",
+    ExecutorKey.MEMORY_REMEMBER: "_execute_memory_remember",
+    ExecutorKey.MEMORY_LIST: "_execute_memory_list",
+    ExecutorKey.MEMORY_UPDATE: "_execute_memory_update",
+    ExecutorKey.MEMORY_FORGET: "_execute_memory_forget",
     ExecutorKey.NOTE_CREATE: "_execute_note_create",
     ExecutorKey.NOTE_LIST: "_execute_note_list",
     ExecutorKey.NOTE_UPDATE: "_execute_note_update",
@@ -291,6 +303,7 @@ class ConversationService:
         self._reminders = RemindersService(session, clock=clock)
         self._notifications = NotificationsService(session, clock=clock)
         self._notes = NotesService(session, clock=clock)
+        self._memories = MemoriesService(session, clock=clock)
         self._lists = ListsService(session, clock=clock)
         self._personal_context = PersonalContextRetriever(
             projects=self._projects, tasks=self._tasks, reminders=self._reminders,
@@ -569,7 +582,14 @@ class ConversationService:
             await self._preflight_plan(current_user, plan, world)
             result = await self._execute_plan(current_user, plan, timezone_name)
         except Exception as exc:  # noqa: BLE001 - confirmed plans fail closed
-            logger.warning("Confirmed plan revalidation failed", extra={"plan_id": str(pending.id)}, exc_info=True)
+            steps = pending.plan_payload.get("steps", [])
+            memory_plan = isinstance(steps, list) and any(
+                isinstance(step, dict) and str(step.get("action", "")).startswith("memory.")
+                for step in steps
+            )
+            logger.warning("Confirmed plan revalidation failed",
+                           extra={"plan_id": str(pending.id), "failure": type(exc).__name__},
+                           exc_info=not memory_plan)
             terminal_persisted = await self._finish_pending_plan(
                 pending,
                 status="failed",
@@ -872,11 +892,14 @@ class ConversationService:
         if not registry.is_allowed(action.action):
             raise UnknownActionError(action.action)
 
+        memory_denial = self._memory_intent_denial((action.action,), message)
+        if memory_denial is not None:
+            return self._respond(memory_denial, turn_language)
         if grounded_world is None and self._action_requires_world(action.action):
             grounded_world = await self._load_world(current_user)
         world = grounded_world or empty_world
         outcome = await self._dispatch(
-            current_user, action, world, timezone_name
+            current_user, action, world, timezone_name, original_request=message
         )
         await self._remember_outcome(outcome)
         return self._respond(outcome, turn_language)
@@ -1011,8 +1034,18 @@ class ConversationService:
         else:  # State transitions above allow at most three finite passes.
             raise RuntimeError("Understanding pass budget exhausted")
 
+        actions = (
+            (result.action,) if isinstance(result, ActionProposal)
+            else tuple(step.action for step in result.plan.steps) if isinstance(result, PlanProposal)
+            else ()
+        )
+        memory_denial = self._memory_intent_denial(actions, message)
+        if memory_denial is not None:
+            return memory_denial
         if state.context_source is not ContextSource.TRUSTED and (
-            isinstance(result, ActionProposal)
+            (isinstance(result, ActionProposal) and not (
+                result.action in {registry.MEMORY_REMEMBER, registry.MEMORY_LIST}
+            ))
             or (
                 isinstance(result, PlanProposal)
                 and self._proposed_plan_requires_world(result)
@@ -1021,6 +1054,12 @@ class ConversationService:
         ):
             world = await self._load_world(current_user)
 
+        if isinstance(result, ActionProposal) and result.action in {
+            registry.MEMORY_UPDATE, registry.MEMORY_FORGET,
+        }:
+            world = await self._load_memory_world(current_user, world)
+        if isinstance(result, ActionProposal) and world is None:
+            world = WorldView(projects=(), tasks=())
         outcome = await self._outcome_from_understanding(
             current_user, result, world, timezone_name, message
         )
@@ -1143,7 +1182,7 @@ class ConversationService:
             )
 
         return await self._dispatch(
-            current_user, action, world, timezone_name
+            current_user, action, world, timezone_name, original_request=original_request
         )
 
     @staticmethod
@@ -1166,6 +1205,8 @@ class ConversationService:
         try:
             plan = self._plan_compiler.compile(proposal.plan)
             plan_world = world or await self._world_for_plan(current_user, plan)
+            if world is not None and self._plan_needs_memories(plan):
+                plan_world = await self._load_memory_world(current_user, plan_world)
             await self._preflight_plan(current_user, plan, plan_world)
         except (PlanValidationError, CompletionTargetNotFoundError, AmbiguousReferenceError) as exc:
             logger.info("Plan validation failed", extra={"failure": type(exc).__name__})
@@ -1304,15 +1345,23 @@ class ConversationService:
             kind="unsupported", executed=False, action="plan", reply=reply
         )
 
+    @staticmethod
+    def _plan_needs_memories(plan: ExecutablePlan) -> bool:
+        return any(step.definition.reference_kind == "memory" and step.result_of is None
+                   for step in plan.steps)
+
     async def _world_for_plan(
         self, current_user: User, plan: ExecutablePlan
     ) -> WorldView:
-        if any(
-            step.definition.requires_world and step.result_of is None
-            for step in plan.steps
-        ):
-            return await self._load_world(current_user)
-        return WorldView(projects=(), tasks=())
+        world = (
+            await self._load_world(current_user)
+            if any(step.definition.requires_world and step.result_of is None
+                   and step.definition.reference_kind != "memory" for step in plan.steps)
+            else WorldView(projects=(), tasks=())
+        )
+        if self._plan_needs_memories(plan):
+            world = await self._load_memory_world(current_user, world)
+        return world
 
     async def _preflight_plan(
         self, current_user: User, plan: ExecutablePlan, world: WorldView
@@ -1335,6 +1384,8 @@ class ConversationService:
                 if self._plan_step_needs_world(step)
                 else WorldView(projects=(), tasks=())
             )
+            if step.definition.reference_kind == "memory" and step.result_of is None:
+                world = await self._load_memory_world(current_user, world)
             return self._resolved_action_from_plan_step(step, world, references), world
 
         async def execute(action: ResolvedAction, world: WorldView) -> ActionResult:
@@ -1415,6 +1466,12 @@ class ConversationService:
             )
         if action in {registry.NOTIFICATION_READ, registry.NOTIFICATION_DISMISS}:
             return ResolvedAction(action=action, notification_id=reference.entity_id)
+        if action in {registry.MEMORY_UPDATE, registry.MEMORY_FORGET}:
+            return ResolvedAction(
+                action=action, memory_id=reference.entity_id,
+                memory_reference_subject=reference.display_text, memory_subject=arguments.get("subject"),
+                memory_kind=arguments.get("kind"), memory_content=arguments.get("content"),
+            )
         if action in {registry.NOTE_UPDATE, registry.NOTE_ARCHIVE}:
             return ResolvedAction(
                 action=action, note_id=reference.entity_id,
@@ -1458,7 +1515,9 @@ class ConversationService:
     def _target_not_found_outcome(message: str, target: str) -> Outcome:
         lowered = message.lower()
         target_type = (
-            "reminder"
+            "memory"
+            if "memory" in lowered or "remember" in lowered or "forget" in lowered
+            else "reminder"
             if "reminder" in lowered
             else "notification"
             if "notification" in lowered
@@ -1501,7 +1560,21 @@ class ConversationService:
         action: ResolvedAction,
         world: WorldView,
         timezone_name: str | None = None,
+        *,
+        original_request: str | None = None,
     ) -> Outcome:
+        if action.action == registry.MEMORY_FORGET:
+            denial = self._memory_intent_denial((action.action,), original_request or "")
+            if denial is not None:
+                return denial
+            proposed = MemoryForgetPlan(steps=[ProposedPlanStep(
+                id="step_1", action=registry.MEMORY_FORGET, reference=action.memory_reference_subject,
+                purpose=f"Forget memory: {action.memory_reference_subject}",
+            )])
+            return await self._outcome_from_plan(
+                current_user, PlanProposal(kind="plan", plan=proposed), world,
+                timezone_name, original_request or "",
+            )
         result = await self._execute_action(
             current_user, action, world, timezone_name
         )
@@ -1759,6 +1832,59 @@ class ConversationService:
                        notification_status=value.status,
                        reference_kind="notification", reference_id=value.id,
                        reference_label=value.title)
+
+    @staticmethod
+    def _memory_intent_denial(actions: tuple[str, ...], message: str) -> Outcome | None:
+        for action in actions:
+            if action in {registry.MEMORY_REMEMBER, registry.MEMORY_LIST, registry.MEMORY_UPDATE, registry.MEMORY_FORGET}:
+                if not explicit_memory_operation(message, action):
+                    return Outcome(kind="ambiguous", executed=False,
+                                   reply="Please explicitly ask me to remember, list, update, or forget that personal memory.")
+        return None
+
+    async def _execute_memory_remember(self, user: User, action: ExecutableAction,
+                                       world: WorldView, timezone_name: str | None) -> Outcome:
+        memory = await self._memories.remember(
+            user, MemoryCreate(**action.arguments.model_dump()),
+            source_thread_id=getattr(self, "_current_thread_id", None),
+        )
+        return self._memory_outcome(action, memory)
+
+    async def _execute_memory_list(self, user: User, action: ExecutableAction,
+                                   world: WorldView, timezone_name: str | None) -> Outcome:
+        values = await self._memories.list_memories(user, status="active")
+        return Outcome(kind="memory_list", executed=True, action=action.definition.name,
+                       memories=tuple((m.kind, m.subject, m.content) for m in values))
+
+    async def _execute_memory_update(self, user: User, action: ExecutableAction,
+                                     world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.memory_id is not None
+        try:
+            memory = await self._memories.update_memory(
+                user, action.grounding.memory_id,
+                MemoryUpdate(**action.arguments.model_dump(exclude_none=True)),
+            )
+        except (MemoryNotFoundError, InvalidMemoryTransitionError):
+            return Outcome(kind="target_not_found", executed=False, target_type="memory",
+                           target=action.grounding.memory_subject)
+        return self._memory_outcome(action, memory)
+
+    async def _execute_memory_forget(self, user: User, action: ExecutableAction,
+                                     world: WorldView, timezone_name: str | None) -> Outcome:
+        assert action.grounding.memory_id is not None
+        try:
+            memory = await self._memories.forget(user, action.grounding.memory_id)
+        except MemoryNotFoundError:
+            return Outcome(kind="target_not_found", executed=False, target_type="memory",
+                           target=action.grounding.memory_subject)
+        return self._memory_outcome(action, memory)
+
+    @staticmethod
+    def _memory_outcome(action: ExecutableAction, memory: object) -> Outcome:
+        return Outcome(kind="memory_changed", executed=True, action=action.definition.name,
+                       memory_subject=memory.subject, memory_status=memory.status,
+                       reference_kind="memory", reference_id=memory.id,
+                       reference_label=memory.subject)
 
     async def _execute_note_create(self, user: User, action: ExecutableAction,
                                    world: WorldView, timezone_name: str | None) -> Outcome:
@@ -2018,6 +2144,16 @@ class ConversationService:
                 notification_id=notification.notification_id,
             )
 
+        if proposal.action == registry.MEMORY_REMEMBER:
+            return ResolvedAction(action=proposal.action, memory_kind=arguments["kind"],
+                                  memory_subject=arguments["subject"], memory_content=arguments["content"])
+        if proposal.action == registry.MEMORY_LIST:
+            return ResolvedAction(action=proposal.action)
+        if proposal.action in {registry.MEMORY_UPDATE, registry.MEMORY_FORGET}:
+            memory = self._resolve_memory_reference(proposal.reference, world)
+            return ResolvedAction(action=proposal.action, memory_id=memory.memory_id,
+                                  memory_reference_subject=memory.subject, memory_subject=arguments.get("subject"),
+                                  memory_kind=arguments.get("kind"), memory_content=arguments.get("content"))
         if proposal.action == registry.NOTE_CREATE:
             if proposal.reference:
                 raise CompletionTargetNotFoundError("that note")
@@ -2209,6 +2345,37 @@ class ConversationService:
             raise AmbiguousReferenceError([item.title for item in candidates])
         raise CompletionTargetNotFoundError(target or "that notification")
 
+    async def _load_memory_world(self, user: User, world: WorldView | None = None) -> WorldView:
+        # This is only invoked after an explicit memory reference action/plan.
+        values = await self._memories.list_memories(user, status="active")
+        return replace(world or WorldView(projects=(), tasks=()), memories=tuple(
+            MemoryRef(m.id, m.subject, m.kind, m.status) for m in values
+        ))
+
+    def _resolve_memory_reference(self, reference: str | None, world: WorldView) -> MemoryRef:
+        target = (reference or "").strip().casefold()
+        try:
+            uuid.UUID(target)
+        except ValueError:
+            pass
+        else:
+            raise CompletionTargetNotFoundError("a memory subject")
+        if target in self._PRONOUN_REFS | {"that memory", "the memory"}:
+            ref = self._durable_reference("memory")
+            if ref is not None:
+                matches = [m for m in world.memories if m.memory_id == ref.entity_id and m.status == "active"]
+                if len(matches) == 1:
+                    return matches[0]
+                raise CompletionTargetNotFoundError(ref.display_text)
+        active = [m for m in world.memories if m.status == "active"]
+        exact = [m for m in active if m.subject.casefold() == target]
+        matches = exact or [m for m in active if target and (target in m.subject.casefold() or m.subject.casefold() in target)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise AmbiguousReferenceError([m.subject for m in matches])
+        raise CompletionTargetNotFoundError(target or "that memory")
+
     def _resolve_note_reference(
         self, reference: str | None, world: WorldView
     ) -> NoteRef:
@@ -2362,7 +2529,7 @@ class ConversationService:
             return False
         verbs = re.findall(
             r"\b(?:create|make|start|add|update|complete|finish|mark|check|archive|"
-            r"dismiss|cancel|remind|list|show)\b",
+            r"dismiss|cancel|remind|list|show|remember|store|save|forget)\b",
             message,
             re.IGNORECASE,
         )
@@ -2430,6 +2597,8 @@ class ConversationService:
 
     async def _remember_outcome(self, outcome: Outcome) -> None:
         if not outcome.reference_kind or not outcome.reference_label:
+            return
+        if outcome.reference_kind == "memory" and outcome.memory_status == "forgotten":
             return
         await self._context_store.set_reference(
             self._current_thread_id,
@@ -2546,6 +2715,9 @@ class ConversationService:
         entity is no longer resolvable, returns None so the responder can use
         a neutral phrase without leaking storage identifiers."""
         payload = activity.payload or {}
+        if activity.entity_type == "memory":
+            subject = payload.get("subject")
+            return subject if isinstance(subject, str) else None
         for key in ("title", "task_title", "name", "content", "list_title"):
             value = payload.get(key)
             if isinstance(value, str) and value:

@@ -43,6 +43,14 @@ ARGUMENT_ADAPTERS: dict[
     ),
     ExecutorKey.NOTIFICATION_READ: _empty,
     ExecutorKey.NOTIFICATION_DISMISS: _empty,
+    ExecutorKey.MEMORY_REMEMBER: lambda action: {
+        "kind": action.memory_kind, "subject": action.memory_subject, "content": action.memory_content,
+    },
+    ExecutorKey.MEMORY_LIST: _empty,
+    ExecutorKey.MEMORY_UPDATE: lambda action: _without_none(
+        kind=action.memory_kind, subject=action.memory_subject, content=action.memory_content,
+    ),
+    ExecutorKey.MEMORY_FORGET: _empty,
     ExecutorKey.NOTE_CREATE: lambda action: {
         "title": action.note_title,
         "content": action.note_content or "",
@@ -87,6 +95,8 @@ def validate_resolved_action(action: ResolvedAction) -> ExecutableAction:
         reminder_id=action.reminder_id,
         reminder_title=action.reminder_title,
         notification_id=action.notification_id,
+        memory_id=action.memory_id,
+        memory_subject=action.memory_reference_subject or action.memory_subject,
         note_id=action.note_id,
         note_title=action.note_title,
         list_id=action.list_id,

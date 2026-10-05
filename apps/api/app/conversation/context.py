@@ -22,7 +22,7 @@ RECENT_CHARACTER_BUDGET = 6000
 
 ReferenceKind = Literal[
     "project", "task", "reminder", "note", "list", "notification",
-    "live_subject", "place", "prior_result",
+    "memory", "live_subject", "place", "prior_result",
 ]
 
 

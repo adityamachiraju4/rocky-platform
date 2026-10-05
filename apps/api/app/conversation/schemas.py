@@ -34,6 +34,11 @@ class ResolvedAction(BaseModel):
     reminder_when: str | None = None
     notification_id: uuid.UUID | None = None
     notification_status: str | None = None
+    memory_id: uuid.UUID | None = None
+    memory_kind: str | None = None
+    memory_subject: str | None = None
+    memory_reference_subject: str | None = None
+    memory_content: str | None = None
     note_id: uuid.UUID | None = None
     note_title: str | None = None
     note_content: str | None = None

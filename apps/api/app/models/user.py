@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from app.models.reminder import Reminder
     from app.models.notification import Notification
     from app.models.note import Note
+    from app.models.memory import Memory
     from app.models.list import List
     from app.models.auth_action_token import AuthActionToken
     from app.models.conversation import ConversationThread
@@ -123,6 +124,9 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    memories: Mapped[list["Memory"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     lists: Mapped[list["List"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True

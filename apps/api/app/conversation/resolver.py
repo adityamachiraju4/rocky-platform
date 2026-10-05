@@ -172,6 +172,14 @@ class ListRef:
 
 
 @dataclass(frozen=True)
+class MemoryRef:
+    memory_id: uuid.UUID
+    subject: str
+    kind: str
+    status: str
+
+
+@dataclass(frozen=True)
 class WorldView:
     """A read snapshot the resolver grounds against. Built by the service
     from the real domain services before the resolver runs."""
@@ -182,6 +190,7 @@ class WorldView:
     notifications: tuple[NotificationRef, ...] = ()
     notes: tuple[NoteRef, ...] = ()
     lists: tuple[ListRef, ...] = ()
+    memories: tuple[MemoryRef, ...] = ()
 
 
 class Resolver(Protocol):
@@ -198,6 +207,19 @@ class HardcodedResolver:
     def resolve(self, message: str, world: WorldView) -> ResolvedAction:
         text = message.strip().lower()
         tokens = _tokens(text)
+
+        from app.conversation.memory_intent import remember_text
+
+        remembered = remember_text(message)
+        if remembered:
+            kind = "preference" if re.search(r"\b(?:prefer|preference)\b", message, re.I) else "fact"
+            return ResolvedAction(
+                action=registry.MEMORY_REMEMBER, memory_kind=kind,
+                memory_subject="Personal preference" if kind == "preference" else "Personal fact",
+                memory_content=remembered,
+            )
+        if text.rstrip(" .?!") in {"list my memories", "show my memories", "what do you remember about me"}:
+            return ResolvedAction(action=registry.MEMORY_LIST)
 
         from app.reminders.interpretation import extract_reminder_intent
 

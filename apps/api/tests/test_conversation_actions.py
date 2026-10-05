@@ -45,6 +45,10 @@ EXPECTED_ACTIONS = (
     "note.list",
     "note.update",
     "note.archive",
+    "memory.remember",
+    "memory.list",
+    "memory.update",
+    "memory.forget",
     "list.create",
     "list.list",
     "list.add_item",
@@ -130,7 +134,7 @@ def test_read_and_write_risk_policy_is_consistent() -> None:
              if definition.mode is ActionMode.READ}
     assert reads == {
         "project.list", "task.list", "activity.recall", "reminder.list",
-        "notification.list", "note.list", "list.list",
+        "notification.list", "note.list", "list.list", "memory.list",
     }
     for definition in ACTION_REGISTRY.definitions:
         if definition.mode is ActionMode.READ:
@@ -142,7 +146,7 @@ def test_read_and_write_risk_policy_is_consistent() -> None:
 
 def test_reversal_actions_are_visible_to_ci4_confirmation_policy() -> None:
     for name in {
-        "reminder.cancel", "notification.dismiss", "note.archive", "list.archive"
+        "reminder.cancel", "notification.dismiss", "note.archive", "list.archive", "memory.forget"
     }:
         definition = ACTION_REGISTRY.get(name)
         assert definition.risk is RiskLevel.DESTRUCTIVE_OR_REVERSAL

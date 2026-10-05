@@ -20,6 +20,7 @@ class ActionDomain(StrEnum):
     ACTIVITY = "activity"
     REMINDER = "reminder"
     NOTIFICATION = "notification"
+    MEMORY = "memory"
     NOTE = "note"
     LIST = "list"
 
@@ -38,6 +39,10 @@ class ExecutorKey(StrEnum):
     NOTIFICATION_LIST = "notification.list"
     NOTIFICATION_READ = "notification.read"
     NOTIFICATION_DISMISS = "notification.dismiss"
+    MEMORY_REMEMBER = "memory.remember"
+    MEMORY_LIST = "memory.list"
+    MEMORY_UPDATE = "memory.update"
+    MEMORY_FORGET = "memory.forget"
     NOTE_CREATE = "note.create"
     NOTE_LIST = "note.list"
     NOTE_UPDATE = "note.update"
@@ -117,6 +122,8 @@ class GroundedActionContext:
     reminder_id: uuid.UUID | None = None
     reminder_title: str | None = None
     notification_id: uuid.UUID | None = None
+    memory_id: uuid.UUID | None = None
+    memory_subject: str | None = None
     note_id: uuid.UUID | None = None
     note_title: str | None = None
     list_id: uuid.UUID | None = None

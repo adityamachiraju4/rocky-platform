@@ -41,6 +41,8 @@ OutcomeKind = Literal[
     "reminder_updated",
     "notification_list",
     "notification_updated",
+    "memory_changed",
+    "memory_list",
     "note_created",
     "note_list",
     "note_updated",
@@ -107,6 +109,10 @@ class Outcome:
     notifications: tuple[tuple[str, str, str], ...] = ()
     notification_title: str | None = None
     notification_status: str | None = None
+    # Explicit memory results; these never become model-world facts.
+    memory_subject: str | None = None
+    memory_status: str | None = None
+    memories: tuple[tuple[str, str, str], ...] = ()
     # notes
     notes: tuple[tuple[str, str], ...] = ()
     note_title: str | None = None
@@ -119,7 +125,7 @@ class Outcome:
     candidates: tuple[str, ...] = ()
     target: str | None = None
     target_type: Literal[
-        "project", "task", "reminder", "notification", "note", "list"
+        "project", "task", "reminder", "notification", "note", "list", "memory"
     ] = "task"
     reply: str | None = None
     # Durable conversational grounding; ids are revalidated against the
@@ -154,6 +160,12 @@ def _recall_phrase(fact: RecallFact) -> str:
         return f"completed {label}" if label else "completed a task"
     if fact.event_type == "task.updated":
         return f"updated the task {label}" if label else "updated a task"
+    if fact.event_type == "memory.remembered":
+        return f"remembered a personal memory {label}"
+    if fact.event_type == "memory.updated":
+        return f"updated a personal memory {label}"
+    if fact.event_type == "memory.forgotten":
+        return f"forgot a personal memory {label}"
     if fact.event_type == "note.created":
         return f"created the note {label}" if label else "created a note"
     if fact.event_type == "note.updated":
@@ -383,6 +395,8 @@ class TemplateResponder:
                 return f"I couldn't find a project called {_quoted(outcome.target)}."
             if outcome.target_type == "list":
                 return f"I couldn't find that active list or list item: {_quoted(outcome.target)}."
+            if outcome.target_type == "memory":
+                return f"I couldn't find an active memory called {_quoted(outcome.target)}."
             if outcome.target_type == "note":
                 return (
                     "I couldn't find an active note called "
@@ -406,6 +420,17 @@ class TemplateResponder:
             return (
                 "I understood that you want to finish a task, but I couldn't "
                 "find an active task to complete."
+            )
+
+        if outcome.kind == "memory_changed":
+            verb = "Forgot" if outcome.memory_status == "forgotten" else "Remembered" if outcome.action == "memory.remember" else "Updated"
+            return f"{verb} your memory: {outcome.memory_subject}."
+
+        if outcome.kind == "memory_list":
+            if not outcome.memories:
+                return "You have no memories in that category."
+            return "Your memories:\n" + "\n".join(
+                f"- {subject} ({kind}): {content}" for kind, subject, content in outcome.memories
             )
 
         if outcome.kind == "ambiguous":

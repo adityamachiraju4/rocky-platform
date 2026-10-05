@@ -50,6 +50,7 @@ from app.voice.reaper import run_voice_model_reaper
 from app.reminders.router import router as reminders_router
 from app.notifications.router import router as notifications_router
 from app.notes.router import router as notes_router
+from app.memories.router import router as memories_router
 from app.lists.router import router as lists_router
 from app.db.session import get_engine, get_sessionmaker
 
@@ -165,6 +166,7 @@ app.include_router(transcription_router)
 app.include_router(reminders_router)
 app.include_router(notifications_router)
 app.include_router(notes_router)
+app.include_router(memories_router)
 app.include_router(lists_router)
 
 

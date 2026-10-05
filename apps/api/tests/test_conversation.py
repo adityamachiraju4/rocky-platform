@@ -5738,6 +5738,256 @@ async def test_ci7_recovery_logs_only_metadata(ctx, caplog):
     assert event.fallback_used is False
     assert private not in str([r.__dict__ for r in caplog.records])
 
+
+# CI-8 Phase A: explicit memory only, with existing execution safety.
+@pytest.mark.asyncio
+async def test_ci8_explicit_remember_fast_path_and_implicit_disclosure(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    provider = _use_fake_provider(ConversationTurn(kind="conversation", reply="Understood."))
+    remembered = await client.post("/conversation", headers=headers, json={"message": "Remember that I prefer concise answers."})
+    assert remembered.json()["action"] == "memory.remember"
+    assert remembered.json()["executed"] is True
+    assert provider.calls == []
+    values = (await client.get("/memories", headers=headers)).json()
+    assert len(values) == 1 and values[0]["kind"] == "preference"
+    assert values[0]["content"] == "I prefer concise answers"
+    assert values[0]["source_thread_id"] == remembered.json()["thread_id"]
+    await client.post("/conversation", headers=headers, json={"message": "I prefer dark mode."})
+    assert len((await client.get("/memories", headers=headers)).json()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["I prefer concise answers.", "Do not remember that I prefer concise answers.", "What does 'remember that I prefer concise answers' mean?"])
+async def test_ci8_untrusted_provider_cannot_create_implicit_memory(ctx, message):
+    client, maker = ctx
+    headers, user_id = await _auth_headers(client, maker)
+    provider = _FakeUnderstandingProvider(ActionProposal(kind="action", action="memory.remember",
+                                                       arguments={"kind": "preference", "subject": "Style", "content": "Concise"}))
+    async with maker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._load_world = AsyncMock(side_effect=AssertionError("implicit memory must not load world"))
+        response = await service.handle(user, message)
+    assert response.executed is False
+    assert "explicitly" in response.reply
+    assert (await client.get("/memories", headers=headers)).json() == []
+
+
+async def _ci8_memory(client, headers, subject="Deployment", content="Use Mumbai"):
+    response = await client.post("/memories", headers=headers,
+                                 json={"kind": "preference", "subject": subject, "content": content})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_ci8_list_owned_active_and_normal_world_omits_memories(ctx):
+    client, maker = ctx
+    headers, user_id = await _auth_headers(client, maker)
+    other, _ = await _auth_headers(client, maker)
+    await _ci8_memory(client, headers, subject="Owned")
+    await _ci8_memory(client, other, subject="Hidden")
+    async with maker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session)
+        full = await service._build_world(user)
+        assert full.memories == ()
+        assert "memories" not in safe_world_payload(full)
+        response = await service.handle(user, "List my memories.")
+    assert response.action == "memory.list"
+    assert "Owned" in response.reply and "Hidden" not in response.reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["owned", "ambiguous", "missing", "other", "forgotten"])
+async def test_ci8_memory_update_requires_owned_active_unambiguous_target(ctx, case):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    other, _ = await _auth_headers(client, maker)
+    if case != "missing":
+        memory = await _ci8_memory(client, other if case == "other" else headers)
+    if case == "ambiguous":
+        await _ci8_memory(client, headers)
+    if case == "forgotten":
+        await client.patch(f"/memories/{memory['id']}", headers=headers, json={"status": "forgotten"})
+    provider = _use_fake_provider(ActionProposal(kind="action", action="memory.update", reference="Deployment",
+                                               arguments={"content": "Use Delhi"}))
+    response = await client.post("/conversation", headers=headers, json={"message": "Update my deployment memory to Delhi."})
+    assert response.status_code == 200, response.text
+    assert response.json()["executed"] is (case == "owned")
+    if case == "owned":
+        changed = (await client.get(f"/memories/{memory['id']}", headers=headers)).json()
+        assert changed["content"] == "Use Delhi" and changed["subject"] == "Deployment"
+    if case == "ambiguous":
+        assert "several" in response.json()["reply"].lower()
+        assert all(m["content"] == "Use Mumbai" for m in (await client.get("/memories", headers=headers)).json())
+    assert "memories" not in safe_world_payload(provider.calls[0]["world"] or WorldView(projects=(), tasks=()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmation", ["Yes", "No"])
+async def test_ci8_single_forget_waits_for_durable_confirmation(ctx, confirmation):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    memory = await _ci8_memory(client, headers)
+    provider = _use_fake_provider(ActionProposal(kind="action", action="memory.forget", reference="Deployment"))
+    proposed = await client.post("/conversation", headers=headers, json={"message": "Forget my deployment memory."})
+    assert proposed.status_code == 200, proposed.text
+    assert proposed.json()["executed"] is False and "Shall I proceed" in proposed.json()["reply"]
+    assert (await client.get(f"/memories/{memory['id']}", headers=headers)).json()["status"] == "active"
+    finished = await client.post("/conversation", headers=headers, json={"message": confirmation})
+    assert finished.json()["executed"] is (confirmation == "Yes")
+    stored = (await client.get(f"/memories/{memory['id']}", headers=headers)).json()
+    assert stored["status"] == ("forgotten" if confirmation == "Yes" else "active")
+    await client.post("/conversation", headers=headers, json={"message": "Yes"})
+    async with maker() as session:
+        events = (await session.scalars(select(Activity).where(Activity.entity_id == uuid.UUID(memory["id"]), Activity.event_type == "memory.forgotten"))).all()
+    assert len(events) == (1 if confirmation == "Yes" else 0)
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ci8_ambiguous_forget_does_not_create_pending_plan(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    await _ci8_memory(client, headers)
+    await _ci8_memory(client, headers)
+    _use_fake_provider(ActionProposal(kind="action", action="memory.forget", reference="Deployment"))
+    response = await client.post("/conversation", headers=headers, json={"message": "Forget my deployment memory."})
+    assert response.json()["executed"] is False
+    assert "several" in response.json()["reply"].lower()
+    async with maker() as session:
+        assert await session.scalar(select(PendingConversationPlan)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [
+    {"memory_id": "forged", "content": "Changed"}, {"user_id": "forged", "content": "Changed"},
+    {"source_thread_id": "forged", "content": "Changed"}, {"source": "explicit_user", "content": "Changed"},
+    {"status": "forgotten"}, {}, {"content": "x" * 2001},
+])
+async def test_ci8_internal_or_malformed_action_arguments_fail_closed(ctx, arguments):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    memory = await _ci8_memory(client, headers)
+    _use_fake_provider(ActionProposal(kind="action", action="memory.update", reference="Deployment", arguments=arguments))
+    response = await client.post("/conversation", headers=headers, json={"message": "Update my deployment memory."})
+    assert response.json()["executed"] is False
+    assert (await client.get(f"/memories/{memory['id']}", headers=headers)).json()["content"] == "Use Mumbai"
+
+
+@pytest.mark.asyncio
+async def test_ci8_stale_durable_memory_reference_cannot_update_forgotten_record(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    remembered = await client.post("/conversation", headers=headers, json={"message": "Remember my deployment region is Mumbai."})
+    assert remembered.json()["executed"] is True
+    memory = (await client.get("/memories", headers=headers)).json()[0]
+    await client.patch(f"/memories/{memory['id']}", headers=headers, json={"status": "forgotten"})
+    _use_fake_provider(ActionProposal(kind="action", action="memory.update", reference="that memory", arguments={"content": "Use Delhi"}))
+    response = await client.post("/conversation", headers=headers, json={"message": "Update that memory to Delhi."})
+    assert response.json()["executed"] is False
+    assert (await client.get(f"/memories/{memory['id']}", headers=headers)).json()["content"] == "my deployment region is Mumbai"
+
+
+@pytest.mark.asyncio
+async def test_ci8_memory_result_reference_plan_is_confirmed_and_revalidated(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    _use_fake_provider(PlanProposal(kind="plan", plan=ProposedPlan(steps=[
+        _proposed_plan_step(1, "memory.remember", {"kind": "preference", "subject": "Style", "content": "Concise"}),
+        _proposed_plan_step(2, "memory.update", {"content": "Very concise"}, result_of="step_1"),
+        _proposed_plan_step(3, "memory.forget", result_of="step_2"),
+    ])))
+    response = await client.post("/conversation", headers=headers,
+                                 json={"message": "Remember my style, update that memory, then forget it."})
+    assert response.json()["executed"] is False
+    assert (await client.get("/memories", headers=headers)).json() == []
+    confirmed = await client.post("/conversation", headers=headers, json={"message": "Yes"})
+    assert confirmed.json()["executed"] is True, confirmed.text
+    values = (await client.get("/memories?status=forgotten", headers=headers)).json()
+    assert len(values) == 1 and values[0]["content"] == "Very concise"
+
+
+@pytest.mark.asyncio
+async def test_ci8_recovery_cannot_remember_without_current_explicit_intent(ctx):
+    client, maker = ctx
+    headers, user_id = await _auth_headers(client, maker)
+    provider = _FakeUnderstandingProvider([
+        ConversationTurn(kind="conversation", reply="We discussed your style."),
+        PersonalContextRequest(kind="personal_context", query="*", scopes=("notes",)),
+        Clarification(kind="clarification", prompt="Which style?"),
+        ActionProposal(kind="action", action="memory.remember", arguments={"kind": "preference", "subject": "Style", "content": "Concise"}),
+    ])
+    async with maker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider)
+        service._load_world = AsyncMock(side_effect=AssertionError("implicit recovery cannot broaden grounding"))
+        service._memories.list_memories = AsyncMock(side_effect=AssertionError("memory retrieval forbidden"))
+        await service.handle(user, "I prefer concise answers.")
+        response = await service.handle(user, "Explain my personal style.")
+    assert len(provider.calls) == 4
+    assert response.executed is False
+    assert (await client.get("/memories", headers=headers)).json() == []
+    assert all(call["world"] is None or call["world"].memories == () for call in provider.calls)
+
+
+@pytest.mark.asyncio
+async def test_ci8_memory_forget_required_independent_verification_fails_closed(ctx):
+    client, maker = ctx
+    headers, user_id = await _auth_headers(client, maker)
+    memory = await _ci8_memory(client, headers)
+    provider = _FakeUnderstandingProvider(ActionProposal(kind="action", action="memory.forget", reference="Deployment"))
+    async with maker() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        service = ConversationService(session, understanding_provider=provider,
+                                      decision_policy=DecisionPolicy(plan_verification_required=True))
+        response = await service.handle(user, "Forget my deployment memory.")
+        assert await session.scalar(select(PendingConversationPlan)) is None
+    assert response.executed is False
+    assert "independent checker" in response.reply
+    assert (await client.get(f"/memories/{memory['id']}", headers=headers)).json()["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_ci8_forget_confirmation_revalidates_forgotten_target(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    memory = await _ci8_memory(client, headers)
+    _use_fake_provider(ActionProposal(kind="action", action="memory.forget", reference="Deployment"))
+    await client.post("/conversation", headers=headers, json={"message": "Forget my deployment memory."})
+    await client.patch(f"/memories/{memory['id']}", headers=headers, json={"status": "forgotten"})
+    result = await client.post("/conversation", headers=headers, json={"message": "Yes"})
+    assert result.json()["executed"] is False
+    async with maker() as session:
+        events = (await session.scalars(select(Activity).where(Activity.entity_id == uuid.UUID(memory["id"]), Activity.event_type == "memory.forgotten"))).all()
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_ci8_provider_raw_memory_uuid_is_not_a_reference(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    memory = await _ci8_memory(client, headers)
+    _use_fake_provider(ActionProposal(kind="action", action="memory.update", reference=memory["id"], arguments={"content": "Changed"}))
+    result = await client.post("/conversation", headers=headers, json={"message": "Update my deployment memory."})
+    assert result.json()["executed"] is False
+    assert (await client.get(f"/memories/{memory['id']}", headers=headers)).json()["content"] == "Use Mumbai"
+
+
+@pytest.mark.asyncio
+async def test_ci8_fast_path_activity_does_not_copy_memory_content(ctx):
+    client, maker = ctx
+    headers, _ = await _auth_headers(client, maker)
+    await client.post("/conversation", headers=headers, json={"message": "Remember that my private launch code is alpha."})
+    memory = (await client.get("/memories", headers=headers)).json()[0]
+    async with maker() as session:
+        event = await session.scalar(select(Activity).where(Activity.entity_id == uuid.UUID(memory["id"])))
+    assert memory["content"] not in str(event.payload)
+    assert event.payload == {"kind": "fact", "subject": "Personal fact"}
+
+
 @pytest.mark.parametrize("base_url", [None, "", " \t\n", "https://openrouter.ai/api/v1"])
 def test_understanding_provider_base_url_configuration(monkeypatch, base_url):
     import openai

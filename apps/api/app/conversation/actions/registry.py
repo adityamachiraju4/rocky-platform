@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.conversation.actions import activity, list as list_actions, note
-from app.conversation.actions import notification, project, reminder, task
+from app.conversation.actions import memory, notification, project, reminder, task
 from app.conversation.actions.base import ActionDefinition, StrictActionArgs
 from app.conversation.exceptions import UnknownActionError
 
@@ -79,6 +79,7 @@ ACTION_REGISTRY = ActionRegistry(
         *reminder.DEFINITIONS,
         *notification.DEFINITIONS,
         *note.DEFINITIONS,
+        *memory.DEFINITIONS,
         *list_actions.DEFINITIONS,
     )
 )
@@ -99,6 +100,10 @@ REMINDER_CANCEL = "reminder.cancel"
 NOTIFICATION_LIST = "notification.list"
 NOTIFICATION_READ = "notification.read"
 NOTIFICATION_DISMISS = "notification.dismiss"
+MEMORY_REMEMBER = "memory.remember"
+MEMORY_LIST = "memory.list"
+MEMORY_UPDATE = "memory.update"
+MEMORY_FORGET = "memory.forget"
 NOTE_CREATE = "note.create"
 NOTE_LIST = "note.list"
 NOTE_UPDATE = "note.update"
@@ -135,4 +140,5 @@ __all__ = [
     "REMINDER_CREATE", "REMINDER_LIST", "TASK_CREATE", "TASK_LIST", "TASK_UPDATE",
     "ActionArgumentsError", "ActionRegistry", "definition", "is_allowed",
     "model_catalog", "parse_arguments",
+    "MEMORY_REMEMBER", "MEMORY_LIST", "MEMORY_UPDATE", "MEMORY_FORGET",
 ]

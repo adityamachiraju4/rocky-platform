@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import ConversationThread, PendingConversationPlan
 from app.conversation.plans.base import ExecutablePlan, ProposedPlan
+from app.conversation.plans.memory_confirmation import MemoryForgetPlan
 
 PLAN_CONFIRMATION_TTL = timedelta(minutes=15)
 
@@ -159,4 +160,6 @@ class PendingPlanStore:
 
     @staticmethod
     def proposed(row: PendingConversationPlan) -> ProposedPlan:
+        if row.plan_payload.get("confirmation_action") == "memory.forget":
+            return MemoryForgetPlan.model_validate(row.plan_payload)
         return ProposedPlan.model_validate(row.plan_payload)

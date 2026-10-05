@@ -240,3 +240,91 @@ no additional authorized continuity is available. It does not introduce an
 independent numerical confidence evaluator for understanding. The provider
 must report remaining interpretation uncertainty as clarification; Rocky's
 existing grounding and execution boundaries remain authoritative.
+
+## CI-8 Phase A: explicit durable personal memory
+
+Personal memory is a dedicated `personal_memories` domain, separate from Notes.
+It stores only explicit user-requested facts/preferences (`kind=fact|preference`).
+Subjects are nonblank and at most 255 characters; content is nonblank and at
+most 2,000 characters, with matching or stricter domain/action/DB bounds.
+Records carry an owned UUID, `user_id`, timestamps, `source=explicit_user`, and
+optional conversation-thread provenance. The thread FK uses `ON DELETE SET
+NULL`; removing a conversation never deletes the durable memory. User deletion
+cascades to owned memories. No content uniqueness constraint is imposed.
+
+Authenticated native endpoints:
+
+- `POST /memories`: explicitly create a memory from kind/subject/content.
+- `GET /memories`: list owned active memories, newest-updated first with stable
+  timestamp/UUID tie breaks. `?status=forgotten` explicitly inspects forgotten
+  records.
+- `GET /memories/{memory_id}`: explicitly inspect an owned record.
+- `PATCH /memories/{memory_id}`: update kind/subject/content or set
+  `status=forgotten`. Empty updates, explicit nulls and extra authoritative
+  fields are rejected. No DELETE endpoint is provided.
+
+Every repository lookup includes both the memory UUID and current user UUID;
+cross-owner reads/updates/forget requests return the same not-found response.
+Lifecycle is irreversible `active → forgotten`. Forgetting sets `forgotten_at`
+and retains the record for audit. Repeated authoritative forget is idempotent;
+forgotten records cannot be updated or revived. Remembering again creates a
+new record. Active and forgotten state/timestamp consistency is DB-constrained.
+
+Four closed typed conversation actions use the existing registry/runtime:
+
+- `memory.remember`: kind/subject/content only, low-risk write, no reference or
+  confirmation. Ownership and thread provenance come from Rocky. Simple English
+  explicit remember/save-as-preference/fact commands have a deterministic fast
+  path that removes the command prefix, stores the requested fact, and uses
+  `Personal fact`/`Personal preference` as a conservative subject rather than
+  copying the private body into the activity label. Complex explicit requests
+  may use registry-constrained provider interpretation.
+- `memory.list`: no arguments/reference, read-only; active records only.
+  Forgotten inspection is available through the explicit native status filter.
+- `memory.update`: textual owned active reference plus at least one semantic
+  change (kind/subject/content). No IDs, provenance, status or timestamps are
+  provider arguments. Nullable unused optional plan arguments retain the
+  existing provider-schema convention; native PATCH rejects explicit null.
+- `memory.forget`: textual owned active reference, no arguments;
+  destructive/reversal risk with `PLAN_STEP` confirmation.
+
+Standalone forgetting becomes a narrowly validated internal one-forget
+confirmation envelope and uses the existing durable pending-plan lifecycle,
+compiler, preflight, independent TypeSafe/JEV verification, confirmation
+classification and atomic claim/revalidation/execution. The model's public
+plan contract still requires 2–8 steps; it cannot supply the internal envelope
+marker. Multi-step memory plans use the ordinary compiler and compatible
+result references. An owned active memory is resolved by exact subject first,
+then unambiguous substring matching. Duplicates/missing/foreign targets never
+mutate. UUID-shaped provider references are rejected. Old durable references
+are checked against current active state and cannot revive forgotten records.
+Forget results do not refresh durable active grounding.
+
+Rocky checks explicit operation intent in the CURRENT request before accepting
+memory proposals, including recovered proposals and plans. Mere statements
+such as “I prefer dark mode” cannot authorize memory creation. Retrieved text,
+past conversation, and provider assertions cannot grant that authority. V1's
+conservative intent grammar supports English imperative forms; unsupported
+wording requires clarification. Generic deterministic subjects can duplicate,
+so later textual updates may require an explicit distinction or a grounded
+“that memory” reference.
+
+Activity events are `memory.remembered`, `memory.updated`, and
+`memory.forgotten`. Payloads contain bounded kind/subject only, never the full
+content field. Changed data emits one event; no-op updates and repeated forget
+emit none. Memory plan failures log metadata rather than exception traces that
+could contain private SQL parameters. Memory content is not logged by new
+application code.
+
+Phase A does not add memories to CI-6 `PersonalScope`, its retriever, normal
+world loading, provider world serialization, or CI-7 recovery context. Active
+memory references (ID/subject/kind/status, without content) are loaded only for
+explicit reference-dependent memory actions/plans. Existing conversation
+history remains a separate continuity system. CI-7's finite pass budget and
+least-privilege retrieval behavior remain unchanged.
+
+Revision `0017_personal_memory` follows `0016_conversation_pending_plans` and
+creates the table, checks, ownership/status/update indexes and FKs. No automatic
+extraction, implicit learning, inferred traits, embeddings/vector search,
+confidence/salience scoring or proactive behavior is implemented. Automatic or
+query-specific memory retrieval is future CI-8 Phase B, not Phase A.
